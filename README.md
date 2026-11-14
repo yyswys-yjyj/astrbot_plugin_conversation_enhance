@@ -4,6 +4,8 @@
 
 > Power by serveryyswys · v1.0.0
 
+变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 指令一览
 
 | 指令 | 作用 |
