@@ -1,0 +1,8 @@
+name: astrbot_plugin_conversation_enhance
+display_name: 对话增强
+short_desc: 对话检索 /show 回看 /fork 分支 /rewrite 改写 / 提示词插入覆盖
+author: serveryyswys
+desc: 围绕 AI 与用户的对话历史提供增强能力：/grep 按关键词跨对话检索轮次并分页返回、/show 原样回看某一轮（先 user 后 AI，间隔 10 秒）、/fork 把前 N 轮复制成新分支、/rewrite 改写最后一条用户消息或 AI 回复、/showprompt 与 /addprompt、/coverprompt、/resetprompt 按单个用户/群插入或覆盖系统提示词。每个指令可单独配置群聊开关与 ID 黑白名单，提示词功能默认关闭。
+version: 1.0.0
+repo: ""
+astrbot_version: ">=4.16"

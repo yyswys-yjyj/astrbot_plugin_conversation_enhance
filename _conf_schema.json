@@ -1,0 +1,189 @@
+{
+  "page_size": {
+    "description": "/grep 每页返回的轮次数量",
+    "type": "int",
+    "default": 3,
+    "hint": "默认 3 轮一页（6 条内容），避免单条消息过长触发平台风控。"
+  },
+  "max_chars": {
+    "description": "/grep 每条内容的截断字数",
+    "type": "int",
+    "default": 150,
+    "hint": "与官方 /history 指令一致，默认每条截断到 150 字。"
+  },
+  "max_total_chars": {
+    "description": "/grep 单条消息的总字数上限",
+    "type": "int",
+    "default": 600,
+    "hint": "超过后本页其余结果会被省略并提示，防止长消息被平台风控。设为 0 表示不限制。"
+  },
+  "show_delay_seconds": {
+    "description": "/show 中 user 与 assistant 之间的间隔（秒）",
+    "type": "int",
+    "default": 10,
+    "hint": "先发用户消息，等待该秒数后再发 AI 回复，避免两条撞在一起。"
+  },
+  "grep_scope": {
+    "description": "/grep 的检索范围",
+    "type": "string",
+    "default": "all",
+    "options": ["all", "current"],
+    "hint": "all = 检索当前会话下的所有对话；current = 只检索当前对话。"
+  },
+  "strip_system_reminder": {
+    "description": "展示时去掉 system_reminder 块",
+    "type": "bool",
+    "default": true,
+    "hint": "历史里的 <system_reminder> 是内部元数据，展示出来会干扰阅读。"
+  },
+  "allow_modify_assistant": {
+    "description": "是否允许修改 AI（assistant）的回复记忆",
+    "type": "bool",
+    "default": true,
+    "hint": "对应 /rewrite ai，关闭后只允许改写用户自己的消息。"
+  },
+  "prompt_preview_chars": {
+    "description": "/showprompt 每条内容的预览字数",
+    "type": "int",
+    "default": 200,
+    "hint": "只影响展示，不影响实际注入；完整内容保存在 data/plugin_data 下的 prompts.json。"
+  },
+  "prompt_permission": {
+    "description": "提示词插入/覆盖（/showprompt、/addprompt、/coverprompt、/resetprompt）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用提示词功能",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。关闭时四个提示词指令提示未开启，也不会改动任何 LLM 请求。"
+      },
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时群聊中的提示词指令与提示词注入都不会生效。"
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "grep_permission": {
+    "description": "/grep 权限",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": true
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "show_permission": {
+    "description": "/show 权限",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": true
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "fork_permission": {
+    "description": "/fork 权限",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": true
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "rewrite_permission": {
+    "description": "/rewrite 权限",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": false,
+        "hint": "默认仅私聊可用；开启后群聊里也能改写对话。"
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  }
+}
