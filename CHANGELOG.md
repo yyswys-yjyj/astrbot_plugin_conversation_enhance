@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-18
+
 ### Added
 
 - `/retitle`：按当前对话的全部历史重新生成标题。
@@ -51,5 +53,6 @@
 - 权限名单在平台拿不到 `sender_id` 时无法匹配，现补充会话 ID、UMO、群号兜底。
 - 引号成对嵌套时尾部引号被误删。
 
-[Unreleased]: https://github.com/yyswys-yjyj/astrbot_plugin_conversation_enhance/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/yyswys-yjyj/astrbot_plugin_conversation_enhance/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/yyswys-yjyj/astrbot_plugin_conversation_enhance/commits/v1.1.0
 [1.0.0]: https://github.com/yyswys-yjyj/astrbot_plugin_conversation_enhance/commits/v1.0.0

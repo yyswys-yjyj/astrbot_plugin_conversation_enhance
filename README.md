@@ -2,7 +2,7 @@
 
 围绕 **AI 与用户的对话历史** 提供增强能力：检索、回看、分支、改写、提示词插入/覆盖。
 
-> Power by serveryyswys · v1.0.0
+> Power by serveryyswys · v1.1.0
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -67,8 +67,6 @@
   配置存放于 `data/plugin_data/astrbot_plugin_conversation_enhance/prompts.json`。
 - 该功能**默认关闭**，需打开 `prompt_permission.enabled`；关闭时指令提示未开启，\
   也不改动任何 LLM 请求。
-- 若同时使用 CmdMask 之类的别名插件，规则要写成 `command=showprompt`、`alias=查看提示词`；\
-  写反会让 `/showprompt` 被改写成不存在的命令、表现为「没有输出」。
 
 ## 自动会话标题
 
