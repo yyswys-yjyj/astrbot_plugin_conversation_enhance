@@ -22,6 +22,7 @@
 | `/addprompt tail\|t\|后 "内容"` | 在默认提示词**后**追加 |
 | `/coverprompt "内容"` | 覆盖默认提示词 |
 | `/resetprompt` | 恢复默认提示词 |
+| `/retitle` | 基于当前对话全部历史重新生成标题 |
 
 ## /grep
 
@@ -66,6 +67,17 @@
   配置存放于 `data/plugin_data/astrbot_plugin_conversation_enhance/prompts.json`。
 - 该功能**默认关闭**，需打开 `prompt_permission.enabled`；关闭时指令提示未开启，\
   也不改动任何 LLM 请求。
+- 若同时使用 CmdMask 之类的别名插件，规则要写成 `command=showprompt`、`alias=查看提示词`；\
+  写反会让 `/showprompt` 被改写成不存在的命令、表现为「没有输出」。
+
+## 自动会话标题
+
+- 开关：`title_enabled`，默认关闭（会额外调用 LLM，产生 token 开支）。
+- 自动触发：消息发送完成后检查当前对话，如果历史里只有**一组**（一条 user 及其后的\
+  assistant 与工具调用记录），且对话还没有标题，就调用一次 LLM 生成标题写回。
+- `/retitle`：按当前对话的**全部**历史重新生成标题，覆盖已有标题。
+- 标题会清理引号、结尾标点、换行并按 `title_max_chars`（默认 20 字）截断。
+- 生成时只取最近 10 轮、每段 300 字作为上下文，避免标题请求本身消耗过多 token。
 
 ## 配置项
 
@@ -79,15 +91,17 @@
 | `strip_system_reminder` | bool | true | 展示时去掉 `<system_reminder>` 块 |
 | `allow_modify_assistant` | bool | true | 是否允许 `/rewrite ai` |
 | `prompt_preview_chars` | int | 200 | `/showprompt` 每条内容的预览字数 |
+| `title_enabled` | bool | false | 自动标题与 `/retitle` 总开关 |
+| `title_max_chars` | int | 20 | 标题字数上限 |
 
 ## 权限配置
 
-每个指令/功能独立配置（`grep_permission` / `show_permission` / `fork_permission` / `rewrite_permission` / `prompt_permission`）：
+每个指令/功能独立配置（`grep_permission` / `show_permission` / `fork_permission` / `rewrite_permission` / `prompt_permission` / `title_auto_permission` / `title_retitle_permission`）：
 
 | 字段 | 说明 |
 |------|------|
 | `enabled` | 仅 `prompt_permission` 有：提示词功能总开关，默认 `false` |
-| `allow_group` | 是否允许在群聊中使用；`/rewrite` 与提示词功能默认 `false`，其余默认 `true` |
+| `allow_group` | 是否允许在群聊中使用；`/rewrite`、提示词功能、标题功能默认 `false`，其余默认 `true` |
 | `mode` | `off` 不限制 / `whitelist` 仅名单内可用 / `blacklist` 名单内禁用，同一指令只能选一种 |
 | `ids` | 名单内容，可填发送者 ID、会话 UMO 或群号，命中任一即算在名单内 |
 

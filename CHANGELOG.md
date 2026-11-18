@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/retitle`：按当前对话的全部历史重新生成标题。
+- 自动会话标题：消息发送后若当前对话只有一组（user + assistant，含工具调用记录）且还没有标题，\
+  自动调用 LLM 生成标题；标题会清理引号/标点/换行并按字数截断。
+- 配置项 `title_enabled`（默认关闭）、`title_max_chars`（默认 20）、\
+  `title_auto_permission` 与 `title_retitle_permission`（各自独立的群聊开关与黑白名单）。
+
 ## [1.0.0] - 2026-11-14
 
 首个正式发布版本：由早期内部版本（会话检索与改写两个插件）合并为「对话增强」。

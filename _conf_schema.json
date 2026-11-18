@@ -81,6 +81,70 @@
       }
     }
   },
+  "title_enabled": {
+    "description": "启用自动会话标题生成与 /retitle",
+    "type": "bool",
+    "default": false,
+    "hint": "会额外调用一次 LLM 生成标题，产生 token 开支，默认关闭。"
+  },
+  "title_max_chars": {
+    "description": "标题字数上限",
+    "type": "int",
+    "default": 20,
+    "hint": "AstrBot 本身不限制标题长度，这里按字数截断，避免标题过长。"
+  },
+  "title_auto_permission": {
+    "description": "自动标题生成权限（第一轮对话结束后触发）",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": false
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "title_retitle_permission": {
+    "description": "/retitle 权限（基于全部历史重新生成标题）",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": false
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
   "grep_permission": {
     "description": "/grep 权限",
     "type": "object",

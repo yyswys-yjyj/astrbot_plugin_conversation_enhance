@@ -30,6 +30,7 @@ from .rounds import (
     Round,
     build_rounds,
     display_text,
+    inline,
     load_history,
     round_matches,
 )
@@ -81,6 +82,12 @@ USAGE_PROMPT = (
     '/addprompt tail|t|后 "内容" 在默认提示词后追加\n'
     '/coverprompt "内容" 覆盖默认提示词\n'
     "/resetprompt 恢复平台默认提示词"
+)
+
+#: 生成会话标题时给模型的系统提示词。
+TITLE_SYSTEM_PROMPT = (
+    "你是对话标题生成器。根据用户给出的对话内容生成一个简短标题，"
+    "只输出标题本身，不要解释、不要引号、不要结尾标点。"
 )
 
 #: 平台会往消息文本里追加的内部标记，解析参数前必须去掉。
@@ -278,6 +285,22 @@ def _parse_coverprompt_args(message: str) -> str:
     if len(parts) < 2:
         return ""
     return _parse_prompt_text(parts[1])
+
+
+def _clean_title(text: str, max_chars: int) -> str:
+    """把模型输出整理成一行标题，并限制字数。"""
+    text = (text or "").strip()
+    for line in text.splitlines():
+        if line.strip():
+            text = line.strip()
+            break
+    text = re.sub(r"^[#>*\-–—\s]+", "", text)
+    text = _strip_quotes(text)
+    text = text.strip("。.!！?？:：;；,，、~～ \t\"'“”‘’「」『』【】[]()（）")
+    text = re.sub(r"\s+", " ", text)
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text
 
 
 class ConversationEnhance(Star):
@@ -629,6 +652,74 @@ class ConversationEnhance(Star):
         """请求 LLM 前按作用域改写系统提示词。"""
         req.system_prompt = self._apply_prompt_custom(event, req.system_prompt or "")
 
+    # ---------------------------------------------------------- 自动会话标题
+
+    @filter.command("retitle")
+    async def cmd_retitle(self, event: AstrMessageEvent) -> None:
+        """基于当前对话的全部历史重新生成标题"""
+        if not self._title_enabled():
+            self._reply(event, "自动标题功能未开启，请先在插件配置中打开 title_enabled。")
+            return
+        if not self._permission_ok(event, "title_retitle"):
+            return
+
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        rounds = build_rounds(
+            load_history(conv.history),
+            strip_reminder=self._bool("strip_system_reminder", True),
+        )
+        if not rounds:
+            self._reply(event, "当前对话还没有历史记录，无法生成标题。")
+            return
+
+        title = await self._generate_title(event, rounds)
+        if not title:
+            self._reply(event, "[FAIL] 生成标题失败，请稍后重试")
+            return
+        try:
+            await self.context.conversation_manager.update_conversation(
+                event.unified_msg_origin, conv.cid, title=title
+            )
+        except Exception:
+            logger.error(f"[title] 保存标题失败: {traceback.format_exc()}")
+            self._reply(event, "[FAIL] 标题已生成但保存失败")
+            return
+        self._reply(event, f"已生成标题：{title}")
+
+    @filter.after_message_sent()
+    async def auto_title(self, event: AstrMessageEvent) -> None:
+        """第一轮对话结束后自动生成标题。"""
+        if not self._title_enabled():
+            return
+        if not self._permission_ok(event, "title_auto", notify=False):
+            return
+
+        conv = await self._silent_conversation(event)
+        if conv is None:
+            return
+        if conv.title and conv.title != "新对话":
+            return  # 已有标题，不覆盖
+
+        rounds = build_rounds(
+            load_history(conv.history),
+            strip_reminder=self._bool("strip_system_reminder", True),
+        )
+        if len(rounds) != 1 or not rounds[0].user_texts:
+            return
+
+        title = await self._generate_title(event, rounds)
+        if not title:
+            return
+        try:
+            await self.context.conversation_manager.update_conversation(
+                event.unified_msg_origin, conv.cid, title=title
+            )
+            logger.info(f"[title] 已自动生成标题：{title}")
+        except Exception:
+            logger.error(f"[title] 保存标题失败: {traceback.format_exc()}")
+
     # -------------------------------------------------------------- 改写实现
 
     async def _handle_user_rewrite(
@@ -902,6 +993,50 @@ class ConversationEnhance(Star):
             return None
         return conv
 
+    async def _silent_conversation(self, event: AstrMessageEvent) -> Any:
+        """取当前对话但不回复任何提示，供后台钩子使用。"""
+        try:
+            conv_mgr = self.context.conversation_manager
+            cid = await conv_mgr.get_curr_conversation_id(event.unified_msg_origin)
+            if not cid:
+                return None
+            return await conv_mgr.get_conversation(event.unified_msg_origin, cid)
+        except Exception:
+            logger.error(f"[title] 获取对话失败: {traceback.format_exc()}")
+            return None
+
+    async def _generate_title(self, event: AstrMessageEvent, rounds: list[Round]) -> str:
+        """调用 LLM 生成标题，失败返回空字符串。"""
+        max_chars = max(1, self._int("title_max_chars", 20))
+        lines: list[str] = []
+        for round_ in rounds[-10:]:
+            if round_.user_text:
+                lines.append(f"用户：{inline(round_.user_text)[:300]}")
+            if round_.assistant_text:
+                lines.append(f"AI：{inline(round_.assistant_text)[:300]}")
+        if not lines:
+            return ""
+
+        prompt = (
+            f"请为下面的对话起一个不超过 {max_chars} 个字的标题：\n\n"
+            + "\n".join(lines)
+        )
+        try:
+            prov_id = await self.context.get_current_chat_provider_id(
+                event.unified_msg_origin
+            )
+            resp = await self.context.llm_generate(
+                chat_provider_id=prov_id,
+                contexts=[
+                    SystemMessageSegment(content=[TextPart(text=TITLE_SYSTEM_PROMPT)]),
+                    UserMessageSegment(content=[TextPart(text=prompt)]),
+                ],
+            )
+        except Exception:
+            logger.error(f"[title] 生成标题失败: {traceback.format_exc()}")
+            return ""
+        return _clean_title(getattr(resp, "completion_text", "") or "", max_chars)
+
     async def _collect_conversations(
         self, event: AstrMessageEvent
     ) -> list[tuple[str, str, str | None]] | None:
@@ -1043,6 +1178,10 @@ class ConversationEnhance(Star):
         """提示词功能总开关，默认关闭。"""
         return self._as_bool(self._permission_config("prompt").get("enabled"), False)
 
+    def _title_enabled(self) -> bool:
+        """自动标题功能总开关，默认关闭。"""
+        return self._as_bool(self._raw("title_enabled", False), False)
+
     def _prompt_ready(self, event: AstrMessageEvent) -> bool:
         """提示词指令的前置检查：功能开关 + 群聊/名单权限。"""
         if not self._prompt_feature_enabled():
@@ -1078,8 +1217,8 @@ class ConversationEnhance(Star):
         """按指令独立校验：群聊开关 + ID 黑/白名单。"""
         conf = self._permission_config(command)
         group_id = event.get_group_id()
-        # rewrite / prompt 默认不允许群聊，其余指令默认允许
-        default_group = command not in {"rewrite", "prompt"}
+        # rewrite / prompt / 标题相关默认不允许群聊，其余指令默认允许
+        default_group = command not in {"rewrite", "prompt", "title_auto", "title_retitle"}
         if group_id and not self._as_bool(conf.get("allow_group"), default_group):
             logger.info(f"[permission] {command} 在群聊 {group_id} 被禁用")
             return False
@@ -1096,6 +1235,10 @@ class ConversationEnhance(Star):
             if notify:
                 if command == "prompt":
                     self._reply(event, "[FAIL] 没有使用提示词指令的权限")
+                elif command == "title_auto":
+                    self._reply(event, "[FAIL] 没有使用自动标题功能的权限")
+                elif command == "title_retitle":
+                    self._reply(event, "[FAIL] 没有使用 /retitle 的权限")
                 else:
                     self._reply(event, f"[FAIL] 没有使用 /{command} 的权限")
             return False
