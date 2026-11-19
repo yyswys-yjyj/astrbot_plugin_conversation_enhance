@@ -13,6 +13,8 @@ import json
 import re
 import shlex
 import traceback
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -55,6 +57,35 @@ SUBJECT_ALIASES = {
 }
 
 PLUGIN_NAME = "astrbot_plugin_conversation_enhance"
+
+#: 重写版本暂存过期时间（分钟）与后台清理间隔（秒），与「遗忘」插件一致。
+REWRITE_EXPIRE_MINUTES = 30
+CLEANUP_INTERVAL_SECONDS = 300
+
+
+@dataclass
+class RewriteRecord:
+    """一轮对话的重写版本暂存（对应遗忘插件的 DeletedRecord）。
+
+    只放在内存里，作为这一轮的可回退快照；下一条 LLM 请求开始或超时后清掉。
+    """
+
+    cid: str
+    base_len: int
+    original_content: Any
+    original_assistant: str = ""
+    versions: List[dict] = field(default_factory=list)
+    current: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    @property
+    def round_count(self) -> int:
+        """累计重写次数。"""
+        return len(self.versions)
+
+    def touch(self) -> None:
+        """刷新时间戳，避免活跃记录被清理。"""
+        self.timestamp = datetime.now()
 
 #: /addprompt 的位置别名：front 插在默认提示词之前，tail 插在其后。
 PROMPT_POSITIONS = {
@@ -395,10 +426,64 @@ class ConversationEnhance(Star):
         self._prompts: dict[str, dict] | None = None
         #: RAG 轮次向量缓存：cid -> (历史签名, 向量列表)
         self._rag_cache: dict[str, tuple[tuple[int, int], list[list[float]]]] = {}
-        #: 重写版本记录（仅内存暂存，随插件生命周期，重载/停用即清空）
-        self._rewrite_store: dict[str, dict] = {}
+        #: 重写版本暂存：umo -> cid -> RewriteRecord（仅内存，随插件生命周期）
+        self._rewrite_store: dict[str, dict[str, RewriteRecord]] = {}
         #: 等待官方链路回填回复的重写任务：umo -> 任务
         self._pending_rewrite: dict[str, dict] = {}
+        #: 暂存并发锁（同遗忘插件）
+        self._rewrite_lock = asyncio.Lock()
+        #: 后台清理任务（同遗忘插件，随插件加载启动、terminate 时取消）
+        self._cleanup_task: asyncio.Task | None = None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:  # 没有运行中的事件循环（如单测直接构造）
+            logger.warning("[rewrite] 未检测到事件循环，暂存清理任务未启动")
+        else:
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    # ------------------------------------------------------------- 暂存生命周期
+
+    async def _cleanup_loop(self) -> None:
+        """定期清理过期的版本暂存。"""
+        while True:
+            try:
+                await self._cleanup_expired()
+                await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                logger.info("[rewrite] 暂存清理任务已取消")
+                break
+            except Exception as exc:
+                logger.error(f"[rewrite] 清理任务出错: {exc}")
+                await asyncio.sleep(60)
+
+    async def _cleanup_expired(self) -> None:
+        """删除超过 REWRITE_EXPIRE_MINUTES 未更新的记录。"""
+        limit = timedelta(minutes=REWRITE_EXPIRE_MINUTES)
+        now = datetime.now()
+        async with self._rewrite_lock:
+            for umo, cid_map in list(self._rewrite_store.items()):
+                for cid, rec in list(cid_map.items()):
+                    if now - rec.timestamp > limit:
+                        del cid_map[cid]
+                        logger.info(f"[rewrite] 清理过期暂存：{umo} / {cid}")
+                if not cid_map:
+                    del self._rewrite_store[umo]
+
+    @filter.on_llm_request()
+    async def clear_staged_on_new_request(
+        self, event: AstrMessageEvent, req: Any
+    ) -> None:
+        """新的一轮 LLM 请求开始时清掉上一轮的版本暂存。
+
+        与遗忘插件的反悔窗口一致：暂存只服务于上一轮，对话继续往下走就失效。
+        重写自身触发的请求带 `_rewrite_launched` 标记，不能清。
+        """
+        if event.get_extra("_rewrite_launched"):
+            return
+        umo = event.unified_msg_origin
+        async with self._rewrite_lock:
+            if self._rewrite_store.pop(umo, None):
+                logger.info(f"[rewrite] 新请求开始，清除上一轮暂存：{umo}")
 
     # ------------------------------------------------------------------ 指令
 
@@ -1111,14 +1196,16 @@ class ConversationEnhance(Star):
         new_text = user_text.replace(old, new, 1)
         content = system_items + [{"type": "text", "text": new_text}]
 
-        rec = self._turn_record(event.unified_msg_origin, conv.cid, history, last_user_idx)
-        rec["versions"].append({"content": content, "assistant": ""})
-        version = len(rec["versions"])
+        rec = await self._turn_record(
+            event.unified_msg_origin, conv.cid, history, last_user_idx
+        )
+        rec.versions.append({"content": content, "assistant": ""})
+        version = len(rec.versions)
 
         if not await self._launch_native_rewrite(
             event, conv, history, rec, new_text, version, content=content
         ):
-            rec["versions"].pop()
+            rec.versions.pop()
             self._reply(event, "[FAIL] 写入对话历史失败，未触发重写")
 
     async def _prepare_resend(self, event: AstrMessageEvent) -> None:
@@ -1133,8 +1220,10 @@ class ConversationEnhance(Star):
             return
 
         user_text, _ = self._split_content(last_user.get("content"))
-        rec = self._turn_record(event.unified_msg_origin, conv.cid, history, last_user_idx)
-        version = int(rec.get("current") or 0)
+        rec = await self._turn_record(
+            event.unified_msg_origin, conv.cid, history, last_user_idx
+        )
+        version = int(rec.current or 0)
 
         if not await self._launch_native_rewrite(
             event, conv, history, rec, user_text, version
@@ -1146,13 +1235,13 @@ class ConversationEnhance(Star):
         event: AstrMessageEvent,
         conv: Any,
         history: List[dict],
-        rec: dict,
+        rec: "RewriteRecord",
         user_text: str,
         version: int,
         content: Any = None,
     ) -> bool:
         """截断到目标轮次之前，改掉事件文本，让 AstrBot 官方链路生成回复。"""
-        base_len = int(rec.get("base_len") or 0)
+        base_len = int(rec.base_len or 0)
         base = history[:base_len]
         try:
             await self.context.conversation_manager.update_conversation(
@@ -1187,31 +1276,31 @@ class ConversationEnhance(Star):
         )
         return True
 
-    def _turn_record(
+    async def _turn_record(
         self, umo: str, cid: str, history: List[dict], last_user_idx: int
-    ) -> dict:
+    ) -> "RewriteRecord":
         """取当前轮的版本记录；换了轮次就重新开始记录。"""
-        umo_map = self._rewrite_store.setdefault(umo, {})
-        rec = umo_map.get(cid)
-        if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
-            last_user = history[last_user_idx]
-            assistant_text = ""
-            for msg in history[last_user_idx + 1 :]:
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    text, _ = self._split_content(msg.get("content"))
-                    if text:
-                        assistant_text = text
-            rec = {
-                "base_len": last_user_idx,
-                "original": {
-                    "content": last_user.get("content"),
-                    "assistant": assistant_text,
-                },
-                "versions": [],
-                "current": 0,
-            }
-            umo_map[cid] = rec
-        return rec
+        async with self._rewrite_lock:
+            cid_map = self._rewrite_store.setdefault(umo, {})
+            rec = cid_map.get(cid)
+            if rec is None or int(rec.base_len) != last_user_idx:
+                last_user = history[last_user_idx]
+                assistant_text = ""
+                for msg in history[last_user_idx + 1 :]:
+                    if isinstance(msg, dict) and msg.get("role") == "assistant":
+                        text, _ = self._split_content(msg.get("content"))
+                        if text:
+                            assistant_text = text
+                rec = RewriteRecord(
+                    cid=cid,
+                    base_len=last_user_idx,
+                    original_content=last_user.get("content"),
+                    original_assistant=assistant_text,
+                )
+                cid_map[cid] = rec
+            else:
+                rec.touch()
+            return rec
 
     async def _handle_rewrite_version(
         self, event: AstrMessageEvent, action: str, number: int
@@ -1222,18 +1311,27 @@ class ConversationEnhance(Star):
             return
         history = self._history_list(conv.history)
         last_user_idx, _ = self._find_last_by_role(history, "user")
-        rec = self._rewrite_store.get(event.unified_msg_origin, {}).get(conv.cid)
+        async with self._rewrite_lock:
+            rec = (self._rewrite_store.get(event.unified_msg_origin) or {}).get(conv.cid)
+            if rec is not None and int(rec.base_len) != last_user_idx:
+                rec = None  # 记录属于更早的轮次
+            if rec is not None:
+                rec.touch()
+                versions = list(rec.versions)
+                total = rec.round_count
+                current = int(rec.current or 0)
+                original = {
+                    "content": rec.original_content,
+                    "assistant": rec.original_assistant,
+                }
+                base_len = int(rec.base_len)
 
-        if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
+        if rec is None:
             if action == "get":
                 self._reply(event, "[rewrite] 当前已重写 0 次，现在是原版")
             else:
                 self._reply(event, "[rewrite] 还没有重写记录，当前是原版")
             return
-
-        versions = rec.get("versions") or []
-        total = len(versions)
-        current = int(rec.get("current") or 0)
 
         if action == "get":
             where = "原版" if current == 0 else f"第 {current} 版"
@@ -1244,7 +1342,7 @@ class ConversationEnhance(Star):
             self._reply(event, f"[rewrite] 版本号超出范围，可用 0 ~ {total}（0 为原版）")
             return
 
-        entry = rec["original"] if number == 0 else versions[number - 1]
+        entry = original if number == 0 else versions[number - 1]
 
         if action == "view":
             text = str(entry.get("assistant") or "")
@@ -1254,7 +1352,6 @@ class ConversationEnhance(Star):
             self._reply(event, text)
             return
 
-        base_len = int(rec.get("base_len") or 0)
         restored = history[:base_len]
         restored.append({"role": "user", "content": entry.get("content")})
         if entry.get("assistant"):
@@ -1273,7 +1370,9 @@ class ConversationEnhance(Star):
             self._reply(event, "[FAIL] 切换版本失败")
             return
 
-        rec["current"] = number
+        async with self._rewrite_lock:
+            rec.current = number
+            rec.touch()
         self._pending_rewrite.pop(event.unified_msg_origin, None)
         self._reply(event, "已恢复原版" if number == 0 else f"已切换到第 {number} 版")
 
@@ -1300,22 +1399,23 @@ class ConversationEnhance(Star):
             logger.warning("[rewrite] 本次重写没有拿到回复文本")
             return
 
-        rec = self._rewrite_store.get(umo, {}).get(str(pending.get("cid") or ""))
-        if not isinstance(rec, dict):
-            return
-
         version = int(pending.get("version") or 0)
-        if version == 0:
-            rec["original"]["assistant"] = text
-            rec["current"] = 0
-        else:
-            versions = rec.get("versions") or []
-            index = version - 1
-            if 0 <= index < len(versions):
-                versions[index]["assistant"] = text
-                rec["current"] = version
-            else:
+        async with self._rewrite_lock:
+            rec = (self._rewrite_store.get(umo) or {}).get(
+                str(pending.get("cid") or "")
+            )
+            if rec is None:
                 return
+            if version == 0:
+                rec.original_assistant = text
+                rec.current = 0
+            else:
+                index = version - 1
+                if not 0 <= index < len(rec.versions):
+                    return
+                rec.versions[index]["assistant"] = text
+                rec.current = version
+            rec.touch()
         logger.info(f"[rewrite] 已记录第 {version} 版回复（{len(text)} 字）")
 
     async def _handle_ai_rewrite(
@@ -1395,11 +1495,19 @@ class ConversationEnhance(Star):
 
     # ---- 重写版本暂存 ----
     # 版本记录只放在 self._rewrite_store（内存字典），随插件生命周期，
-    # 重载/停用即清空；与「撤回」插件的 last_bot_messages 同一套做法。
+    # 重载/停用即清空；清理任务与「遗忘」插件一致。
 
     async def terminate(self) -> None:
-        """插件卸载/停用时清空内存中的暂存数据。"""
-        self._rewrite_store.clear()
+        """插件卸载/停用时取消清理任务并清空暂存。"""
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
+        async with self._rewrite_lock:
+            self._rewrite_store.clear()
         self._pending_rewrite.clear()
 
     async def _current_conversation(self, event: AstrMessageEvent) -> Any:

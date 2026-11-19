@@ -22,8 +22,9 @@
 - `/rewrite` 与 `/rewrite user|u` 改为走 AstrBot 官方消息链路：插件截断历史到本轮之前并\
   替换 `event.message_str`，由官方流程生成回复，不再自建 `llm_generate` 流水线；\
   生成完成后在 `on_llm_response` 钩子里把回复回填到对应版本。
-- 版本记录只做内存暂存（插件实例内字典，按会话与对话 ID 分开），不落盘；\
-  插件重载/停用触发 `terminate` 时清空，与「撤回」插件 `last_bot_messages` 的做法一致。
+- 版本记录只做内存暂存（`RewriteRecord` 数据类 + `asyncio.Lock`，按会话与对话 ID 分开），\
+  不落盘；参照「遗忘」插件：后台每 5 分钟清理超过 30 分钟未更新的记录，\
+  下一条 LLM 请求开始时清掉上一轮暂存，`terminate` 时取消清理任务并清空。
 - 自动标题改在 `on_llm_response` 触发：AstrBot 采用洋葱式调度，`after_message_sent` 时\
   本轮历史尚未写库，旧实现在第一轮读不到对话内容，标题不会生成。
 
