@@ -14,9 +14,12 @@
 | `/gettop` | 查看当前对话的轮数 |
 | `/show 轮次` | 原样回看某一轮：先发 user，隔 10 秒再按条发 AI |
 | `/fork 轮次` | 把第 1~N 轮复制成新对话，标题 `原标题-分支` |
-| `/rewrite` | 重发：让模型重新生成上一条回复，不改提示词 |
-| `/rewrite user\|u "旧文本" "新文本"` | 改写自己最后一条消息，并让 AI 重新回答 |
-| `/rewrite ai\|a "旧文本" "新文本"` | 改写 AI 最后一条回复（记忆修正） |
+| `/rewrite` | 重发：让 AstrBot 官方链路重新生成当前版本的回复 |
+| `/rewrite user\|u "旧文本" "新文本"` | 改写自己最后一条消息，并交给官方链路重新回答 |
+| `/rewrite ai\|a "旧文本" "新文本"` | 改写 AI 最后一条回复（仅修正记忆，不重新生成） |
+| `/rewrite get` | 查看当前轮已重写几次、现在是第几版 |
+| `/rewrite set n` | 切回第 n 次重写的版本（`0` 为原版） |
+| `/rewrite view n` | 预览第 n 次重写版本的回复原文 |
 | `/rewrite_help` | 查看改写帮助 |
 | `/showprompt` | 查看本用户/群已配置的提示词 |
 | `/addprompt front\|f\|前 "内容"` | 在默认提示词**前**追加 |
@@ -55,12 +58,21 @@
 
 ## /rewrite
 
-- 仅私聊可用，群聊会被拦截。
+- 默认仅私聊可用，群聊会被拦截（可用 `rewrite_permission.allow_group` 打开）。
+- 改写与重发都交回 **AstrBot 官方消息链路**：插件把历史截断到这一轮之前、\
+  替换 `event.message_str`，再由官方流程用同样的提示词、模型与会话状态生成回复，\
+  不再走插件自建的 `llm_generate` 流水线。
+- 每轮独立记录版本：原版为第 0 版，每次 `/rewrite u` 追加一版；官方链路回复发送完成后\
+  自动把回复原文回填到该版本。
+- `/rewrite get`：输出「当前已重写 n 次，现在是第 n 版」或「现在是原版」。
+- `/rewrite set n`：把对话历史切回第 n 版（`0` 为原版）；`/rewrite view n` 只预览该版回复原文。
+- `/rewrite ai` 只修正 AI 的记忆文本，不重新生成回复。
+- 版本记录保存在 `data/plugin_data/astrbot_plugin_conversation_enhance/rewrite_versions.json`，\
+  按会话与对话 ID 分开；进入新一轮后版本从 0 重新计数。
 - 子串替换，重复出现多处时会要求提供更多特征文本。
 - 文本含空格时用引号或括号包裹，两个参数需使用相同符号：
   `"文本"`、`'文本'`、`(文本)`、`“文本”`、`‘文本’`、`「文本」`、`『文本』`。
 - 引号可嵌套，例如 `/rewrite u “他说“你好”然后走了” “新的句子”`。
-- 改写用户消息后会调用 LLM 重新生成回复，并处理调用期间并发到达的新消息。
 
 ## 提示词插入/覆盖
 
@@ -75,8 +87,7 @@
 - `/showprompt`：展示本作用域已配置的覆盖/头部/尾部内容（预览长度受 `prompt_preview_chars` 限制）。
 - 内容引号支持半角/全角，且可嵌套，与 `/grep`、`/rewrite` 一致。
 - 注入时机是 AstrBot 的 `on_llm_request` 钩子，直接改写 `req.system_prompt`；\
-  `/rewrite` 内部直接调用 `llm_generate`，已额外复用同一套拼接逻辑，\
-  所以改写用户消息或重发时也会继承本作用域的提示词。\
+  `/rewrite` 的改写与重发也走官方请求，因此同样会带上本作用域的提示词。\
   配置存放于 `data/plugin_data/astrbot_plugin_conversation_enhance/prompts.json`。
 - 该功能**默认关闭**，需打开 `prompt_permission.enabled`；关闭时指令提示未开启，\
   也不改动任何 LLM 请求。

@@ -13,6 +13,16 @@
 - `/grep -ai "检索词"`：把候选轮次交给 LLM 挑选，最多展示 3 条。
 - `/grep -rag "检索词" [页码]`：用 AstrBot 配置的嵌入模型做向量检索，按相似度排序、分页并显示相似度。
 - 配置项 `grep_ai_max_rounds`、`grep_ai_max_chars`、`rag_round_chars`、`rag_embedding_provider`。
+- `/rewrite get`：查看当前轮已重写几次、现在是第几版。
+- `/rewrite set n`：切回第 n 次重写的版本（`0` 为原版）。
+- `/rewrite view n`：预览第 n 次重写版本的回复原文。
+
+### Changed
+
+- `/rewrite` 与 `/rewrite user|u` 改为走 AstrBot 官方消息链路：插件截断历史到本轮之前并\
+  替换 `event.message_str`，由官方流程生成回复，不再自建 `llm_generate` 流水线；\
+  生成完成后通过 `after_message_sent` 把回复回填到对应版本，记录存于 \
+  `data/plugin_data/astrbot_plugin_conversation_enhance/rewrite_versions.json`。
 
 ## [1.1.0] - 2026-11-18
 

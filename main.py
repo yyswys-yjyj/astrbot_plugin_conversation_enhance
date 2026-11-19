@@ -20,7 +20,6 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import (
-    AssistantMessageSegment,
     SystemMessageSegment,
     TextPart,
     UserMessageSegment,
@@ -253,17 +252,44 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def _parse_rewrite_args(
     raw: str,
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """解析 /rewrite 参数，返回 (主体, 旧文本, 新文本, 错误)。"""
+) -> Tuple[Optional[str], Any, Any, Optional[str]]:
+    """解析 /rewrite 参数，返回 (动作, 参数1, 参数2, 错误)。
+
+    动作：resend / user / ai / get / set / view。
+    """
     raw = _MSG_ID_RE.sub("", raw).strip()
-    # 裸 rewrite（不带参数）= 重发：不替换提示词，直接让模型重新生成上一条回复
+    # 裸 rewrite（不带参数）= 重发：让模型重新生成当前版本的回复
     if re.match(r"^[^\w]?rewrite\s*$", raw, re.IGNORECASE):
         return "resend", None, None, None
-    match = re.match(r"^[^\w]?rewrite\s+(user|ai|u|a)\s+(.*)", raw, re.IGNORECASE | re.DOTALL)
+
+    match = re.match(
+        r"^[^\w]?rewrite\s+(get|set|view|user|ai|u|a)\b\s*(.*)$",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
     if not match:
-        return None, None, None, "指令格式错误，应为 rewrite user|u / ai|a <旧文本> <新文本>"
-    target = {"u": "user", "a": "ai"}.get(match.group(1).lower(), match.group(1).lower())
-    args_str = match.group(2).strip()
+        return (
+            None,
+            None,
+            None,
+            "指令格式错误，应为 rewrite u|ai <旧文本> <新文本> / get / set n / view n",
+        )
+
+    sub = match.group(1).lower()
+    rest = match.group(2).strip()
+
+    if sub == "get":
+        if rest:
+            return None, None, None, "/rewrite get 不需要参数"
+        return "get", None, None, None
+
+    if sub in {"set", "view"}:
+        if not rest.isdigit():
+            return None, None, None, f"/rewrite {sub} 需要一个版本号（0 表示原版）"
+        return sub, int(rest), None, None
+
+    target = {"u": "user", "a": "ai"}.get(sub, sub)
+    args_str = rest
 
     delim_pairs = [
         ('"', '"'),
@@ -369,6 +395,10 @@ class ConversationEnhance(Star):
         self._prompts: dict[str, dict] | None = None
         #: RAG 轮次向量缓存：cid -> (历史签名, 向量列表)
         self._rag_cache: dict[str, tuple[tuple[int, int], list[list[float]]]] = {}
+        #: 重写版本记录缓存：umo -> cid -> 记录
+        self._rewrite_store: dict[str, dict] | None = None
+        #: 等待官方链路回填回复的重写任务：umo -> 任务
+        self._pending_rewrite: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ 指令
 
@@ -801,55 +831,49 @@ class ConversationEnhance(Star):
 
     @filter.command("rewrite")
     async def cmd_rewrite(self, event: AstrMessageEvent) -> None:
-        """改写最后一条用户消息或 AI 回复"""
+        """改写最后一条用户消息、重发，或切换/查看重写版本"""
         if not self._permission_ok(event, "rewrite"):
             return
 
-        target, old, new, err = _parse_rewrite_args(event.message_str)
+        action, arg1, arg2, err = _parse_rewrite_args(event.message_str)
         if err:
             logger.info(f"[rewrite] 解析失败: {err}")
             self._reply(event, f"[FAIL] {err}")
             return
-        logger.info(f"[rewrite] target={target}, old={repr(old)}, new={repr(new)}")
+        logger.info(f"[rewrite] action={action}, arg1={repr(arg1)}, arg2={repr(arg2)}")
 
-        if target == "ai" and not self._bool("allow_modify_assistant", True):
+        if action == "ai" and not self._bool("allow_modify_assistant", True):
             self._reply(event, "[FAIL] 修改 AI 记忆功能未开启")
             return
 
-        umo = event.unified_msg_origin
-        conv_mgr = self.context.conversation_manager
-
-        try:
-            curr_cid = await conv_mgr.get_curr_conversation_id(umo)
-        except Exception:
-            logger.error(f"获取对话ID失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 获取对话 ID 失败")
+        if action == "get":
+            await self._handle_rewrite_version(event, "get", 0)
             return
-        if not curr_cid:
-            self._reply(event, "[FAIL] 无法获取当前对话 ID")
+        if action in {"set", "view"}:
+            await self._handle_rewrite_version(event, action, int(arg1))
             return
-
-        try:
-            conversation = await conv_mgr.get_conversation(umo, curr_cid)
-        except Exception:
-            logger.error(f"获取对话对象失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 获取对话对象失败")
+        if action == "user":
+            await self._prepare_user_rewrite(event, str(arg1 or ""), str(arg2 or ""))
             return
-        if not conversation or not conversation.history:
-            self._reply(event, "[FAIL] 当前对话没有可修改的历史")
+        if action == "resend":
+            await self._prepare_resend(event)
             return
 
-        history = self._history_list(conversation.history)
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        history = self._history_list(conv.history)
         if not history:
             self._reply(event, "[FAIL] 对话历史格式异常")
             return
-
-        if target == "resend":
-            await self._handle_resend(event, history, umo, curr_cid)
-        elif target == "user":
-            await self._handle_user_rewrite(event, history, old, new, umo, curr_cid)
-        else:
-            await self._handle_ai_rewrite(event, history, old, new, umo, curr_cid)
+        await self._handle_ai_rewrite(
+            event,
+            history,
+            str(arg1 or ""),
+            str(arg2 or ""),
+            event.unified_msg_origin,
+            conv.cid,
+        )
 
     @filter.command("rewrite_help")
     async def cmd_rewrite_help(self, event: AstrMessageEvent) -> None:
@@ -858,8 +882,11 @@ class ConversationEnhance(Star):
             event,
             "【对话增强】改写帮助\n"
             "重发（重新生成上一条回复，不改提示词）：/rewrite\n"
-            '修改自己最后一条消息：/rewrite user|u "旧文本" "新文本"\n'
-            '修改 AI 最后一条回复：/rewrite ai|a "旧文本" "新文本"\n'
+            '修改自己最后一条消息并重新生成回复：/rewrite user|u "旧文本" "新文本"\n'
+            '修改 AI 最后一条回复（只改记忆，不重新生成）：/rewrite ai|a "旧文本" "新文本"\n'
+            "查看版本状态：/rewrite get（当前已重写 n 次，现在是第几版）\n"
+            "切换版本：/rewrite set n（0 为原版）\n"
+            "预览某版回复原文：/rewrite view n\n"
             "支持子串替换，若重复多处会提示；文本含空格请用引号或括号包裹。\n"
             "引号可嵌套，例如 /rewrite u “他说“你好”然后走了” “新的句子”。\n"
             "支持的包裹符号：英文双引号、英文单引号、半角圆括号、中文引号、直角引号",
@@ -1034,16 +1061,14 @@ class ConversationEnhance(Star):
 
     # -------------------------------------------------------------- 改写实现
 
-    async def _handle_user_rewrite(
-        self,
-        event: AstrMessageEvent,
-        history: List[dict],
-        old: str,
-        new: str,
-        umo: str,
-        curr_cid: str,
+    async def _prepare_user_rewrite(
+        self, event: AstrMessageEvent, old: str, new: str
     ) -> None:
-        # 1. 定位最后一条用户消息
+        """替换最后一条用户消息，并交给 AstrBot 正常链路重新生成回复。"""
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        history = self._history_list(conv.history)
         last_user_idx, last_user = self._find_last_by_role(history, "user")
         if last_user_idx == -1:
             self._reply(event, "[FAIL] 没有找到用户消息")
@@ -1057,164 +1082,228 @@ class ConversationEnhance(Star):
             self._reply(event, "[FAIL] 匹配到多处相同的文本，请提供更多特征文本以避免歧义")
             return
 
-        # 2. 构造新用户消息
-        new_user_text = user_text.replace(old, new, 1)
-        new_content = system_items + [{"type": "text", "text": new_user_text}]
-        new_user_msg = {"role": "user", "content": new_content}
+        new_text = user_text.replace(old, new, 1)
+        content = system_items + [{"type": "text", "text": new_text}]
 
-        # 3. 确定删除区间（确保 end >= start）
-        last_ai_idx, _ = self._find_last_by_role(history, "assistant")
-        delete_start = last_user_idx
-        delete_end = max(last_ai_idx, last_user_idx)
+        rec = self._turn_record(event.unified_msg_origin, conv.cid, history, last_user_idx)
+        rec["versions"].append({"content": content, "assistant": ""})
+        version = len(rec["versions"])
 
-        temp_history = [msg for i, msg in enumerate(history) if i < delete_start or i > delete_end]
-        temp_history.append(new_user_msg)
+        if not await self._launch_native_rewrite(
+            event, conv, history, rec, new_text, version, content=content
+        ):
+            rec["versions"].pop()
+            self._save_rewrite_store()
+            self._reply(event, "[FAIL] 写入对话历史失败，未触发重写")
 
-        # 4. 加载人格 system_prompt，并叠加本作用域配置的提示词
-        system_prompt = await self._load_system_prompt(umo, curr_cid)
-        system_prompt = self._apply_prompt_custom(event, system_prompt)
-
-        # 5. 构建 LLM 上下文
-        contexts = []
-        if system_prompt:
-            contexts.append(SystemMessageSegment(content=[TextPart(text=system_prompt)]))
-        contexts.extend(self._history_to_message_segments(temp_history))
-
-        # 6. 调用 LLM
-        try:
-            prov_id = await self.context.get_current_chat_provider_id(umo)
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=prov_id,
-                contexts=contexts,
-            )
-            assistant_text = llm_resp.completion_text
-        except asyncio.TimeoutError:
-            logger.error("LLM 调用超时")
-            self._reply(event, "[FAIL] 调用 LLM 超时，历史未修改")
+    async def _prepare_resend(self, event: AstrMessageEvent) -> None:
+        """裸 /rewrite：让 AstrBot 重新生成当前版本的回复。"""
+        conv = await self._current_conversation(event)
+        if conv is None:
             return
-        except Exception:
-            logger.error(f"LLM 调用失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 调用 LLM 失败，历史未修改")
-            return
-
-        # 7. 处理并发新消息
-        try:
-            fresh_conv = await self.context.conversation_manager.get_conversation(umo, curr_cid)
-            if fresh_conv and fresh_conv.history:
-                fresh_history = self._history_list(fresh_conv.history)
-                extra_msgs = fresh_history[len(history):] if len(fresh_history) > len(history) else []
-            else:
-                extra_msgs = []
-        except Exception:
-            logger.error(f"并发检查失败: {traceback.format_exc()}")
-            extra_msgs = []
-
-        # 8. 安全修改历史（先删除旧区间，再追加本次重写的新对话，最后追加并发消息）
-        self._remove_range(history, delete_start, delete_end)
-        # 先添加本次重写产生的新用户消息和 AI 回复
-        history.append(new_user_msg)
-        history.append({"role": "assistant", "content": [{"type": "text", "text": assistant_text}]})
-        # 再追加 LLM 期间并发的新消息（它们应该发生在本次重写之后）
-        if extra_msgs:
-            history.extend(extra_msgs)
-            logger.info(f"[rewrite] 追加了 {len(extra_msgs)} 条并发消息（已保证时间顺序）")
-
-        # 9. 持久化
-        try:
-            await self.context.conversation_manager.update_conversation(umo, curr_cid, history=history)
-            logger.info("[rewrite] 新对话对已保存")
-        except Exception:
-            logger.error(f"保存对话失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 修改成功但保存失败")
-            return
-
-        self._reply(event, assistant_text)
-
-    async def _handle_resend(
-        self,
-        event: AstrMessageEvent,
-        history: List[dict],
-        umo: str,
-        curr_cid: str,
-    ) -> None:
-        """裸 /rewrite（重发）：不替换任何提示词，直接用历史让模型重新生成上一条回复。"""
-        last_user_idx, _ = self._find_last_by_role(history, "user")
+        history = self._history_list(conv.history)
+        last_user_idx, last_user = self._find_last_by_role(history, "user")
         if last_user_idx == -1:
             self._reply(event, "[FAIL] 没有找到可重发的用户消息")
             return
 
-        # 只丢掉末尾那条 AI 回复，用户那条原样保留（不替换、不重建）
-        drop_idx = None
-        last_msg = history[-1]
-        if isinstance(last_msg, dict) and last_msg.get("role") == "assistant":
-            drop_idx = len(history) - 1
-        temp_history = [msg for i, msg in enumerate(history) if i != drop_idx]
-        logger.info(
-            f"[rewrite] 重发: 上下文 {len(temp_history)} 条, 丢弃末尾 AI 回复: {drop_idx is not None}"
-        )
+        user_text, _ = self._split_content(last_user.get("content"))
+        rec = self._turn_record(event.unified_msg_origin, conv.cid, history, last_user_idx)
+        version = int(rec.get("current") or 0)
 
-        # 加载人格 system_prompt，并叠加本作用域配置的提示词
-        system_prompt = await self._load_system_prompt(umo, curr_cid)
-        system_prompt = self._apply_prompt_custom(event, system_prompt)
+        if not await self._launch_native_rewrite(
+            event, conv, history, rec, user_text, version
+        ):
+            self._reply(event, "[FAIL] 写入对话历史失败，未触发重发")
 
-        # 构建 LLM 上下文（只有历史，不注入任何新提示词）
-        contexts = []
-        if system_prompt:
-            contexts.append(SystemMessageSegment(content=[TextPart(text=system_prompt)]))
-        contexts.extend(self._history_to_message_segments(temp_history))
-
-        # 调用 LLM
+    async def _launch_native_rewrite(
+        self,
+        event: AstrMessageEvent,
+        conv: Any,
+        history: List[dict],
+        rec: dict,
+        user_text: str,
+        version: int,
+        content: Any = None,
+    ) -> bool:
+        """截断到目标轮次之前，改掉事件文本，让 AstrBot 官方链路生成回复。"""
+        base_len = int(rec.get("base_len") or 0)
+        base = history[:base_len]
         try:
-            prov_id = await self.context.get_current_chat_provider_id(umo)
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=prov_id,
-                contexts=contexts,
+            await self.context.conversation_manager.update_conversation(
+                event.unified_msg_origin, conv.cid, history=base
             )
-            assistant_text = llm_resp.completion_text
-        except asyncio.TimeoutError:
-            logger.error("LLM 调用超时")
-            self._reply(event, "[FAIL] 调用 LLM 超时，历史未修改")
-            return
         except Exception:
-            logger.error(f"LLM 调用失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 调用 LLM 失败，历史未修改")
-            return
+            logger.error(f"[rewrite] 截断历史失败: {traceback.format_exc()}")
+            return False
 
-        if not assistant_text or not assistant_text.strip():
-            logger.error("[rewrite] LLM 返回空回复，历史未修改")
-            self._reply(event, "[FAIL] 模型返回空回复，历史未修改")
-            return
+        self._pending_rewrite[event.unified_msg_origin] = {
+            "cid": conv.cid,
+            "user": user_text,
+            "version": version,
+            "content": content,
+            "base_len": base_len,
+            "event": event,
+        }
+        self._save_rewrite_store()
 
-        # 处理并发新消息
+        event.message_str = user_text
         try:
-            fresh_conv = await self.context.conversation_manager.get_conversation(umo, curr_cid)
-            if fresh_conv and fresh_conv.history:
-                fresh_history = self._history_list(fresh_conv.history)
-                extra_msgs = fresh_history[len(history):] if len(fresh_history) > len(history) else []
+            if getattr(event, "message_obj", None) is not None:
+                event.message_obj.message_str = user_text
+        except Exception:  # 部分平台的事件对象不允许写入
+            pass
+        event.clear_result()
+        logger.info(
+            f"[rewrite] 已截断到 {base_len} 条，交给 AstrBot 链路生成第 {version} 版"
+        )
+        return True
+
+    def _turn_record(
+        self, umo: str, cid: str, history: List[dict], last_user_idx: int
+    ) -> dict:
+        """取当前轮的版本记录；换了轮次就重新开始记录。"""
+        store = self._load_rewrite_store()
+        umo_map = store.setdefault(umo, {})
+        rec = umo_map.get(cid)
+        if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
+            last_user = history[last_user_idx]
+            assistant_text = ""
+            for msg in history[last_user_idx + 1 :]:
+                if isinstance(msg, dict) and msg.get("role") == "assistant":
+                    text, _ = self._split_content(msg.get("content"))
+                    if text:
+                        assistant_text = text
+            rec = {
+                "base_len": last_user_idx,
+                "original": {
+                    "content": last_user.get("content"),
+                    "assistant": assistant_text,
+                },
+                "versions": [],
+                "current": 0,
+            }
+            umo_map[cid] = rec
+        return rec
+
+    async def _handle_rewrite_version(
+        self, event: AstrMessageEvent, action: str, number: int
+    ) -> None:
+        """处理 /rewrite get|set|view。"""
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        history = self._history_list(conv.history)
+        last_user_idx, _ = self._find_last_by_role(history, "user")
+        store = self._load_rewrite_store()
+        rec = store.get(event.unified_msg_origin, {}).get(conv.cid)
+
+        if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
+            if action == "get":
+                self._reply(event, "[rewrite] 当前已重写 0 次，现在是原版")
             else:
-                extra_msgs = []
-        except Exception:
-            logger.error(f"并发检查失败: {traceback.format_exc()}")
-            extra_msgs = []
-
-        # 用新回复顶掉旧的那条 AI 回复（用户消息保持原样）
-        if drop_idx is not None:
-            del history[drop_idx]
-        history.append({"role": "assistant", "content": [{"type": "text", "text": assistant_text}]})
-        if extra_msgs:
-            history.extend(extra_msgs)
-            logger.info(f"[rewrite] 追加了 {len(extra_msgs)} 条并发消息（已保证时间顺序）")
-
-        # 持久化
-        try:
-            await self.context.conversation_manager.update_conversation(umo, curr_cid, history=history)
-            logger.info("[rewrite] 重发结果已保存")
-        except Exception:
-            logger.error(f"保存对话失败: {traceback.format_exc()}")
-            self._reply(event, "[FAIL] 修改成功但保存失败")
+                self._reply(event, "[rewrite] 还没有重写记录，当前是原版")
             return
 
-        self._reply(event, assistant_text)
+        versions = rec.get("versions") or []
+        total = len(versions)
+        current = int(rec.get("current") or 0)
+
+        if action == "get":
+            where = "原版" if current == 0 else f"第 {current} 版"
+            self._reply(event, f"[rewrite] 当前已重写 {total} 次，现在是{where}")
+            return
+
+        if number < 0 or number > total:
+            self._reply(event, f"[rewrite] 版本号超出范围，可用 0 ~ {total}（0 为原版）")
+            return
+
+        entry = rec["original"] if number == 0 else versions[number - 1]
+
+        if action == "view":
+            text = str(entry.get("assistant") or "")
+            if not text:
+                self._reply(event, "[rewrite] 该版本还没有生成回复")
+                return
+            self._reply(event, text)
+            return
+
+        base_len = int(rec.get("base_len") or 0)
+        restored = history[:base_len]
+        restored.append({"role": "user", "content": entry.get("content")})
+        if entry.get("assistant"):
+            restored.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": entry["assistant"]}],
+                }
+            )
+        try:
+            await self.context.conversation_manager.update_conversation(
+                event.unified_msg_origin, conv.cid, history=restored
+            )
+        except Exception:
+            logger.error(f"[rewrite] 切换版本失败: {traceback.format_exc()}")
+            self._reply(event, "[FAIL] 切换版本失败")
+            return
+
+        rec["current"] = number
+        self._pending_rewrite.pop(event.unified_msg_origin, None)
+        self._save_rewrite_store()
+        self._reply(event, "已恢复原版" if number == 0 else f"已切换到第 {number} 版")
+
+    @filter.after_message_sent()
+    async def capture_rewrite_reply(self, event: AstrMessageEvent) -> None:
+        """重写触发的回复生成完成后，把回复文本记进对应版本。"""
+        umo = event.unified_msg_origin
+        pending = self._pending_rewrite.get(umo)
+        if not pending:
+            return
+        # 只认发起重写的那个事件，避免同会话的其他消息抢占回填
+        if pending.get("event") is not event:
+            return
+        conv = await self._silent_conversation(event)
+        if conv is None or conv.cid != pending.get("cid"):
+            return
+
+        history = self._history_list(conv.history)
+        base_len = int(pending.get("base_len") or 0)
+        last_user_idx, last_user = self._find_last_by_role(history, "user")
+        if last_user is None or last_user_idx < base_len:
+            return
+        user_text, _ = self._split_content(last_user.get("content"))
+        # 官方请求可能附带图片/文件等文本片段，用包含关系判断而不是全等
+        expected = inline(str(pending.get("user") or ""))
+        if expected and expected not in inline(user_text):
+            return
+
+        text = ""
+        for msg in history[last_user_idx + 1 :]:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                candidate, _ = self._split_content(msg.get("content"))
+                if candidate:
+                    text = candidate
+        if not text:
+            return
+
+        self._pending_rewrite.pop(umo, None)
+        store = self._load_rewrite_store()
+        rec = store.get(umo, {}).get(conv.cid)
+        if not isinstance(rec, dict):
+            return
+
+        version = int(pending.get("version") or 0)
+        if version == 0:
+            rec["original"]["assistant"] = text
+            rec["current"] = 0
+        else:
+            versions = rec.get("versions") or []
+            index = version - 1
+            if 0 <= index < len(versions):
+                versions[index]["assistant"] = text
+                rec["current"] = version
+        self._save_rewrite_store()
+        logger.info(f"[rewrite] 已记录第 {version} 版回复（{len(text)} 字）")
 
     async def _handle_ai_rewrite(
         self,
@@ -1289,6 +1378,51 @@ class ConversationEnhance(Star):
             return True
         except Exception:
             logger.error(f"[prompt] 保存提示词失败: {traceback.format_exc()}")
+            return False
+
+    # ---- 重写版本存储 ----
+
+    def _rewrite_path(self) -> Path:
+        """版本数据文件：data/plugin_data/<插件名>/rewrite_versions.json。"""
+        return StarTools.get_data_dir(PLUGIN_NAME) / "rewrite_versions.json"
+
+    def _load_rewrite_store(self) -> dict:
+        if self._rewrite_store is None:
+            self._rewrite_store = self._read_rewrite_store()
+        return self._rewrite_store
+
+    def _read_rewrite_store(self) -> dict:
+        try:
+            with self._rewrite_path().open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            logger.error(f"[rewrite] 读取版本记录失败: {traceback.format_exc()}")
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("[rewrite] rewrite_versions.json 不是对象，已忽略")
+            return {}
+        store: dict[str, dict] = {}
+        for umo, umo_map in data.items():
+            if not isinstance(umo_map, dict):
+                continue
+            store[str(umo)] = {
+                str(cid): rec for cid, rec in umo_map.items() if isinstance(rec, dict)
+            }
+        return store
+
+    def _save_rewrite_store(self) -> bool:
+        try:
+            path = self._rewrite_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(self._rewrite_store or {}, fh, ensure_ascii=False, indent=2)
+            tmp.replace(path)
+            return True
+        except Exception:
+            logger.error(f"[rewrite] 保存版本记录失败: {traceback.format_exc()}")
             return False
 
     async def _current_conversation(self, event: AstrMessageEvent) -> Any:
@@ -1371,28 +1505,6 @@ class ConversationEnhance(Star):
         conversations = sorted(conversations, key=lambda item: item.created_at)
         return [(conv.title or "新对话", conv.cid, conv.history) for conv in conversations]
 
-    async def _load_system_prompt(self, umo: str, curr_cid: str) -> str:
-        """加载当前对话使用的人格 system_prompt（取不到就返回空字符串）。"""
-        try:
-            conv_mgr = self.context.conversation_manager
-            conversation = await conv_mgr.get_conversation(umo, curr_cid)
-            persona_id = conversation.persona_id if conversation else None
-            if persona_id:
-                persona = await self.context.persona_manager.get_persona(persona_id)
-                if persona:
-                    system_prompt = persona.system_prompt or ""
-                    logger.info(f"[rewrite] 已加载人格: {persona_id}, 长度: {len(system_prompt)}")
-                    return system_prompt
-                logger.warning(f"[rewrite] 人格未找到: {persona_id}")
-            else:
-                default_persona = await self.context.persona_manager.get_default_persona_v3(umo)
-                if default_persona and "prompt" in default_persona:
-                    logger.info("[rewrite] 使用默认人格")
-                    return default_persona["prompt"]
-        except Exception:
-            logger.error(f"加载人格失败: {traceback.format_exc()}")
-        return ""
-
     @staticmethod
     def _split_content(content: Any) -> Tuple[str, List[dict]]:
         """拆出纯文本与需要保留的非文本/系统部分。"""
@@ -1441,43 +1553,6 @@ class ConversationEnhance(Star):
             if isinstance(msg, dict) and msg.get("role") == role:
                 return i, msg
         return -1, None
-
-    @staticmethod
-    def _remove_range(history: List[dict], start: int, end: int) -> None:
-        if 0 <= start <= end < len(history):
-            del history[start:end + 1]
-        else:
-            logger.warning(f"_remove_range 索引无效: start={start}, end={end}, len={len(history)}")
-
-    @staticmethod
-    def _history_to_message_segments(history: List[dict]) -> List[Any]:
-        segments: list[Any] = []
-        for msg in history:
-            content = msg.get("content")
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text_parts = []
-                non_text_count = 0
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        text_parts.append(item.get("text", ""))
-                    else:
-                        non_text_count += 1
-                if non_text_count > 0:
-                    logger.warning(f"消息包含 {non_text_count} 个非文本组件，将被丢弃")
-                text = "".join(text_parts)
-            else:
-                text = str(content)
-
-            role = msg.get("role")
-            if role == "user":
-                segments.append(UserMessageSegment(content=[TextPart(text=text)]))
-            elif role == "assistant":
-                segments.append(AssistantMessageSegment(content=[TextPart(text=text)]))
-            elif role == "system":
-                segments.append(SystemMessageSegment(content=[TextPart(text=text)]))
-        return segments
 
     # ---- 权限控制 ----
 
