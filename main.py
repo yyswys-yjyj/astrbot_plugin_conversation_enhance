@@ -395,8 +395,8 @@ class ConversationEnhance(Star):
         self._prompts: dict[str, dict] | None = None
         #: RAG 轮次向量缓存：cid -> (历史签名, 向量列表)
         self._rag_cache: dict[str, tuple[tuple[int, int], list[list[float]]]] = {}
-        #: 重写版本记录缓存：umo -> cid -> 记录
-        self._rewrite_store: dict[str, dict] | None = None
+        #: 重写版本记录（仅内存暂存，随插件生命周期，重载/停用即清空）
+        self._rewrite_store: dict[str, dict] = {}
         #: 等待官方链路回填回复的重写任务：umo -> 任务
         self._pending_rewrite: dict[str, dict] = {}
 
@@ -1119,7 +1119,6 @@ class ConversationEnhance(Star):
             event, conv, history, rec, new_text, version, content=content
         ):
             rec["versions"].pop()
-            self._save_rewrite_store()
             self._reply(event, "[FAIL] 写入对话历史失败，未触发重写")
 
     async def _prepare_resend(self, event: AstrMessageEvent) -> None:
@@ -1171,7 +1170,6 @@ class ConversationEnhance(Star):
             "base_len": base_len,
             "event": event,
         }
-        self._save_rewrite_store()
 
         event.message_str = user_text
         try:
@@ -1193,8 +1191,7 @@ class ConversationEnhance(Star):
         self, umo: str, cid: str, history: List[dict], last_user_idx: int
     ) -> dict:
         """取当前轮的版本记录；换了轮次就重新开始记录。"""
-        store = self._load_rewrite_store()
-        umo_map = store.setdefault(umo, {})
+        umo_map = self._rewrite_store.setdefault(umo, {})
         rec = umo_map.get(cid)
         if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
             last_user = history[last_user_idx]
@@ -1225,8 +1222,7 @@ class ConversationEnhance(Star):
             return
         history = self._history_list(conv.history)
         last_user_idx, _ = self._find_last_by_role(history, "user")
-        store = self._load_rewrite_store()
-        rec = store.get(event.unified_msg_origin, {}).get(conv.cid)
+        rec = self._rewrite_store.get(event.unified_msg_origin, {}).get(conv.cid)
 
         if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
             if action == "get":
@@ -1279,7 +1275,6 @@ class ConversationEnhance(Star):
 
         rec["current"] = number
         self._pending_rewrite.pop(event.unified_msg_origin, None)
-        self._save_rewrite_store()
         self._reply(event, "已恢复原版" if number == 0 else f"已切换到第 {number} 版")
 
     @filter.on_llm_response()
@@ -1305,8 +1300,7 @@ class ConversationEnhance(Star):
             logger.warning("[rewrite] 本次重写没有拿到回复文本")
             return
 
-        store = self._load_rewrite_store()
-        rec = store.get(umo, {}).get(str(pending.get("cid") or ""))
+        rec = self._rewrite_store.get(umo, {}).get(str(pending.get("cid") or ""))
         if not isinstance(rec, dict):
             return
 
@@ -1322,7 +1316,6 @@ class ConversationEnhance(Star):
                 rec["current"] = version
             else:
                 return
-        self._save_rewrite_store()
         logger.info(f"[rewrite] 已记录第 {version} 版回复（{len(text)} 字）")
 
     async def _handle_ai_rewrite(
@@ -1400,50 +1393,14 @@ class ConversationEnhance(Star):
             logger.error(f"[prompt] 保存提示词失败: {traceback.format_exc()}")
             return False
 
-    # ---- 重写版本存储 ----
+    # ---- 重写版本暂存 ----
+    # 版本记录只放在 self._rewrite_store（内存字典），随插件生命周期，
+    # 重载/停用即清空；与「撤回」插件的 last_bot_messages 同一套做法。
 
-    def _rewrite_path(self) -> Path:
-        """版本数据文件：data/plugin_data/<插件名>/rewrite_versions.json。"""
-        return StarTools.get_data_dir(PLUGIN_NAME) / "rewrite_versions.json"
-
-    def _load_rewrite_store(self) -> dict:
-        if self._rewrite_store is None:
-            self._rewrite_store = self._read_rewrite_store()
-        return self._rewrite_store
-
-    def _read_rewrite_store(self) -> dict:
-        try:
-            with self._rewrite_path().open(encoding="utf-8") as fh:
-                data = json.load(fh)
-        except FileNotFoundError:
-            return {}
-        except Exception:
-            logger.error(f"[rewrite] 读取版本记录失败: {traceback.format_exc()}")
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("[rewrite] rewrite_versions.json 不是对象，已忽略")
-            return {}
-        store: dict[str, dict] = {}
-        for umo, umo_map in data.items():
-            if not isinstance(umo_map, dict):
-                continue
-            store[str(umo)] = {
-                str(cid): rec for cid, rec in umo_map.items() if isinstance(rec, dict)
-            }
-        return store
-
-    def _save_rewrite_store(self) -> bool:
-        try:
-            path = self._rewrite_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            with tmp.open("w", encoding="utf-8") as fh:
-                json.dump(self._rewrite_store or {}, fh, ensure_ascii=False, indent=2)
-            tmp.replace(path)
-            return True
-        except Exception:
-            logger.error(f"[rewrite] 保存版本记录失败: {traceback.format_exc()}")
-            return False
+    async def terminate(self) -> None:
+        """插件卸载/停用时清空内存中的暂存数据。"""
+        self._rewrite_store.clear()
+        self._pending_rewrite.clear()
 
     async def _current_conversation(self, event: AstrMessageEvent) -> Any:
         """取当前对话，没有则回复提示并返回 None。"""
