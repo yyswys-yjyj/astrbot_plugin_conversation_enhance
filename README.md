@@ -10,7 +10,8 @@
 
 | 指令 | 作用 |
 |------|------|
-| `/grep [user\|u\|ai\|a] "检索词" [页码]` | 跨对话检索轮次，按时间线编号，分页返回 |
+| `/grep [user\|u\|ai\|a] ["-ai"\|"-rag"] "检索词" [页码]` | 跨对话检索轮次，支持子串 / AI / RAG 三种模式 |
+| `/gettop` | 查看当前对话的轮数 |
 | `/show 轮次` | 原样回看某一轮：先发 user，隔 10 秒再按条发 AI |
 | `/fork 轮次` | 把第 1~N 轮复制成新对话，标题 `原标题-分支` |
 | `/rewrite` | 重发：让模型重新生成上一条回复，不改提示词 |
@@ -33,6 +34,18 @@
 - 匹配前会压平空白，原文跨行也能命中。
 - 输出按官方 `/history` 风格省略：每页 3 轮、单条 150 字、单条消息总量 600 字，防止触发平台风控。
 - `/grep a` 只匹配 AI 侧，`/grep u` 只匹配用户侧。
+
+### 语义检索
+
+- `/grep u -ai "检索词"`：把候选轮次编号后交给 LLM，让它返回最相关的轮次编号数组，\
+  最多展示 3 条，无分页；候选上限由 `grep_ai_max_rounds` / `grep_ai_max_chars` 控制。
+- `/grep u -rag "检索词" [页码]`：用 AstrBot 中配置的嵌入模型做向量检索，\
+  按余弦相似度排序并分页、显示相似度；可用 `rag_embedding_provider` 指定模型，留空取第一个。
+- 两种模式都复用 `grep_permission` 的权限配置。
+
+## /gettop
+
+- 返回当前对话的轮数，便于配合 `/show`、`/fork` 使用；不需要额外配置。
 
 ## /show 与 /fork
 
@@ -84,6 +97,10 @@
 | `page_size` | int | 3 | `/grep` 每页轮次数 |
 | `max_chars` | int | 150 | `/grep` 每条内容截断字数 |
 | `max_total_chars` | int | 600 | `/grep` 单条消息总字数上限，0 = 不限制 |
+| `grep_ai_max_rounds` | int | 100 | `/grep -ai` 候选轮次上限 |
+| `grep_ai_max_chars` | int | 12000 | `/grep -ai` 候选内容总字数上限，0 = 不限制 |
+| `rag_round_chars` | int | 500 | `/grep -rag` 每轮参与向量计算的字数 |
+| `rag_embedding_provider` | string | 空 | 指定嵌入模型 Provider ID，留空取第一个 |
 | `show_delay_seconds` | int | 10 | `/show` 中 user 与 AI 之间的间隔 |
 | `grep_scope` | string | all | `all` = 当前会话下所有对话；`current` = 仅当前对话 |
 | `strip_system_reminder` | bool | true | 展示时去掉 `<system_reminder>` 块 |

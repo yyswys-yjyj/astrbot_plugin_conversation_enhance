@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/gettop`：查看当前对话的轮数，无需额外配置。
+- `/grep -ai "检索词"`：把候选轮次交给 LLM 挑选，最多展示 3 条。
+- `/grep -rag "检索词" [页码]`：用 AstrBot 配置的嵌入模型做向量检索，按相似度排序、分页并显示相似度。
+- 配置项 `grep_ai_max_rounds`、`grep_ai_max_chars`、`rag_round_chars`、`rag_embedding_provider`。
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

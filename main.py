@@ -35,7 +35,12 @@ from .rounds import (
     round_matches,
 )
 
-USAGE_GREP = '用法：/grep [user|u|ai|a] "检索词" [页码]，例如 /grep u "某件事" 1'
+USAGE_GREP = (
+    '用法：/grep [user|u|ai|a] ["-ai"|"-rag"] "检索词" [页码]\n'
+    '  子串检索：/grep u "某件事" 1\n'
+    '  AI 检索：/grep u -ai "某件事"（最多 3 条，无页码）\n'
+    '  RAG 检索：/grep u -rag "某件事" 1（需要已配置嵌入模型）'
+)
 USAGE_SHOW = "用法：/show 轮次，例如 /show 3"
 USAGE_FORK = "用法：/fork 轮次，例如 /fork 3（把第 1~3 轮复制成新分支）"
 
@@ -174,8 +179,11 @@ def _parse_keyword_and_page(text: str) -> tuple[str, int]:
     return _trim_stray_quote(_strip_quotes(text)), page
 
 
-def _parse_grep_args(message: str) -> tuple[str, str, int] | None:
-    """解析 /grep 的主体、检索词与页码，失败返回 None。"""
+def _parse_grep_args(message: str) -> tuple[str, str, int, str] | None:
+    """解析 /grep 的主体、检索词、页码与检索模式，失败返回 None。
+
+    模式由主体后的 ``-ai`` / ``-rag`` 开关决定，缺省为子串检索。
+    """
     text = _MSG_ID_RE.sub(" ", message).strip()
     parts = text.split(maxsplit=1)
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -189,10 +197,58 @@ def _parse_grep_args(message: str) -> tuple[str, str, int] | None:
     if subject is None:
         return None
 
-    keyword, page = _parse_keyword_and_page(match.group(2))
+    mode = "substring"
+    remainder = match.group(2).strip()
+    flag = re.match(r"^--?(ai|rag)\s+(.*)$", remainder, re.IGNORECASE | re.DOTALL)
+    if flag:
+        mode = flag.group(1).lower()
+        remainder = flag.group(2)
+
+    keyword, page = _parse_keyword_and_page(remainder)
     if not keyword:
         return None
-    return subject, keyword, page
+    return subject, keyword, page, mode
+
+
+def _parse_index_list(text: str, limit: int) -> list[int]:
+    """从模型输出里解析轮次下标数组，非法项丢弃并按上限过滤。"""
+    match = re.search(r"\[[^\]]*\]", text or "", re.DOTALL)
+    if not match:
+        return []
+
+    payload = match.group(0)
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        data = re.findall(r"\d+", payload)
+
+    result: list[int] = []
+    for item in data if isinstance(data, list) else []:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            index = item
+        elif isinstance(item, float):
+            index = int(item)
+        elif isinstance(item, str) and item.strip().isdigit():
+            index = int(item.strip())
+        else:
+            continue
+        if 1 <= index <= limit and index not in result:
+            result.append(index)
+    return result
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    """余弦相似度，长度不一致或空向量返回 0。"""
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    norm_left = sum(a * a for a in left) ** 0.5
+    norm_right = sum(b * b for b in right) ** 0.5
+    if not norm_left or not norm_right:
+        return 0.0
+    return dot / (norm_left * norm_right)
 
 
 def _parse_rewrite_args(
@@ -311,6 +367,8 @@ class ConversationEnhance(Star):
         self.config = config or {}
         #: 提示词配置缓存，None 表示尚未从磁盘读取
         self._prompts: dict[str, dict] | None = None
+        #: RAG 轮次向量缓存：cid -> (历史签名, 向量列表)
+        self._rag_cache: dict[str, tuple[tuple[int, int], list[list[float]]]] = {}
 
     # ------------------------------------------------------------------ 指令
 
@@ -323,10 +381,17 @@ class ConversationEnhance(Star):
         if parsed is None:
             self._reply(event, USAGE_GREP)
             return
-        subject, keyword, page = parsed
+        subject, keyword, page, mode = parsed
 
         conversations = await self._collect_conversations(event)
         if conversations is None:
+            return
+
+        if mode == "ai":
+            await self._grep_by_ai(event, keyword, conversations)
+            return
+        if mode == "rag":
+            await self._grep_by_rag(event, keyword, page, subject, conversations)
             return
 
         entries: list[tuple[str, str, Round]] = []
@@ -351,32 +416,62 @@ class ConversationEnhance(Star):
         page = min(page, total_pages)
         chunk = entries[(page - 1) * page_size : page * page_size]
 
-        limit = self._int("max_chars", 150)
-        budget = self._int("max_total_chars", 600)
-        show_conv = len(conversations) > 1
         subject_arg = "user" if subject == "user" else "ai"
         header = (
             f"以下是检索结果（共 {len(entries)} 条 "
             f"| 第 {page} 页 / 共 {total_pages} 页）："
         )
+        next_hint = (
+            f'*输入 /grep {subject_arg} "{keyword}" {page + 1} 翻页'
+            if total_pages > 1
+            else None
+        )
+        self._reply(
+            event,
+            self._render_entries(
+                chunk,
+                page,
+                total_pages,
+                len(conversations) > 1,
+                header,
+                next_hint,
+            ),
+        )
+
+    def _render_entries(
+        self,
+        chunk: list,
+        page: int,
+        total_pages: int,
+        show_conv: bool,
+        header: str,
+        next_hint: str | None,
+    ) -> str:
+        """渲染检索结果；条目可以是 (标题, cid, 轮次) 或带相似度的四元组。"""
+        limit = self._int("max_chars", 150)
+        budget = self._int("max_total_chars", 600)
         lines = [header, ""]
         used = len(header) + 2
         shown = 0
         omitted = 0
         last_cid = None
 
-        for title, cid, round_ in chunk:
+        for item in chunk:
+            title, cid, round_ = item[0], item[1], item[2]
+            score = item[3] if len(item) > 3 else None
             block: list[str] = []
             if show_conv and cid != last_cid:
                 block.append(f"【对话：{title}（{cid[:4]}）】")
             block.append(f"第 {round_.number} 轮")
+            if score is not None:
+                block.append(f"相似度：{score:.3f}")
             block.append(f"user：{display_text(round_.user_text or '（无）', limit)}")
             block.append(
                 f"assistant：{display_text(round_.assistant_text or '（无）', limit)}"
             )
             block.append("")
 
-            block_len = sum(len(item) + 1 for item in block)
+            block_len = sum(len(text) + 1 for text in block)
             if budget > 0 and shown > 0 and used + block_len > budget:
                 omitted = len(chunk) - shown
                 break
@@ -388,11 +483,228 @@ class ConversationEnhance(Star):
 
         if omitted:
             lines.append(f"…（本页其余 {omitted} 条已省略，可用更精确的检索词或翻页）")
+        if next_hint:
+            lines.append(next_hint)
+        return "\n".join(lines).rstrip()
 
-        if total_pages > 1:
-            lines.append(f'*输入 /grep {subject_arg} "{keyword}" {page + 1} 翻页')
+    async def _grep_by_ai(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        conversations: list[tuple[str, str, str | None]],
+    ) -> None:
+        """让 LLM 从候选轮次里挑出最相关的至多 3 轮。"""
+        max_rounds = max(1, self._int("grep_ai_max_rounds", 100))
+        max_chars = max(0, self._int("grep_ai_max_chars", 12000))
 
-        self._reply(event, "\n".join(lines).rstrip())
+        entries: list[tuple[str, str, Round]] = []
+        lines: list[str] = []
+        used = 0
+        for title, cid, history_raw in conversations:
+            rounds = build_rounds(
+                load_history(history_raw),
+                strip_reminder=self._bool("strip_system_reminder", True),
+            )
+            for round_ in rounds:
+                if len(entries) >= max_rounds:
+                    break
+                text = (
+                    f"[{len(entries) + 1}] 用户：{inline(round_.user_text)[:200]}\n"
+                    f"AI：{inline(round_.assistant_text)[:200]}"
+                )
+                if max_chars and used + len(text) > max_chars:
+                    break
+                entries.append((title, cid, round_))
+                lines.append(text)
+                used += len(text) + 1
+            if len(entries) >= max_rounds or (max_chars and used >= max_chars):
+                break
+
+        if not entries:
+            self._reply(event, "当前会话下还没有可检索的对话历史。")
+            return
+
+        prompt = (
+            f"检索需求：{keyword}\n\n"
+            "下面是候选对话轮次，编号在方括号内：\n\n"
+            + "\n".join(lines)
+            + "\n\n请选出与检索需求最相关的最多 3 个轮次，"
+            "只输出编号组成的 JSON 数组（如 [2, 5]），不要解释。"
+        )
+        try:
+            prov_id = await self.context.get_current_chat_provider_id(
+                event.unified_msg_origin
+            )
+            resp = await self.context.llm_generate(
+                chat_provider_id=prov_id,
+                contexts=[
+                    SystemMessageSegment(
+                        content=[TextPart(text="你是对话检索助手，只输出 JSON 数组。")]
+                    ),
+                    UserMessageSegment(content=[TextPart(text=prompt)]),
+                ],
+            )
+            indices = _parse_index_list(
+                getattr(resp, "completion_text", "") or "", len(entries)
+            )
+        except Exception:
+            logger.error(f"[grep] AI 检索失败: {traceback.format_exc()}")
+            self._reply(event, "[FAIL] AI 检索失败，请稍后重试")
+            return
+
+        picks = [entries[index - 1] for index in indices[:3]]
+        if not picks:
+            self._reply(event, "AI 没有选出相关轮次，可以换个说法或改用子串检索。")
+            return
+
+        header = f"语义检索（AI 判断，共 {len(picks)} 条）："
+        self._reply(
+            event,
+            self._render_entries(picks, 1, 1, len(conversations) > 1, header, None),
+        )
+
+    async def _grep_by_rag(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        page: int,
+        subject: str,
+        conversations: list[tuple[str, str, str | None]],
+    ) -> None:
+        """用嵌入模型做向量检索，按相似度排序并分页。"""
+        providers = self.context.get_all_embedding_providers()
+        if not providers:
+            self._reply(
+                event,
+                "当前 AstrBot 没有配置嵌入模型（Embedding Provider），无法进行 RAG 检索。",
+            )
+            return
+
+        provider = self._pick_embedding_provider(providers)
+        round_chars = max(50, self._int("rag_round_chars", 500))
+
+        targets: list[tuple[str, str, Round]] = []
+        vectors: list[list[float]] = []
+        for title, cid, history_raw in conversations:
+            rounds = build_rounds(
+                load_history(history_raw),
+                strip_reminder=self._bool("strip_system_reminder", True),
+            )
+            if not rounds:
+                continue
+            texts = [
+                f"用户：{inline(round_.user_text)}\nAI：{inline(round_.assistant_text)}"[
+                    :round_chars
+                ]
+                for round_ in rounds
+            ]
+            cached = await self._rag_vectors(cid, history_raw, texts, provider)
+            if cached is None:
+                self._reply(event, "[FAIL] 向量计算失败，请查看日志")
+                return
+            for round_, vector in zip(rounds, cached):
+                targets.append((title, cid, round_))
+                vectors.append(vector)
+
+        if not targets:
+            self._reply(event, "当前会话下还没有可检索的对话历史。")
+            return
+
+        try:
+            query_vector = await provider.get_embedding(keyword)
+        except Exception:
+            logger.error(f"[grep] RAG 查询向量失败: {traceback.format_exc()}")
+            self._reply(event, "[FAIL] 查询向量计算失败，请稍后重试")
+            return
+
+        scored = [
+            (title, cid, round_, _cosine(query_vector, vector))
+            for (title, cid, round_), vector in zip(targets, vectors)
+        ]
+        scored = [item for item in scored if item[3] > 0]
+        if not scored:
+            self._reply(event, "没有检索到相关轮次。")
+            return
+        scored.sort(key=lambda item: item[3], reverse=True)
+
+        page_size = max(1, self._int("page_size", 3))
+        total_pages = max(1, (len(scored) + page_size - 1) // page_size)
+        page = min(max(1, page), total_pages)
+        chunk = scored[(page - 1) * page_size : page * page_size]
+
+        subject_arg = "user" if subject == "user" else "ai"
+        header = (
+            f"语义检索（RAG，共 {len(scored)} 条 "
+            f"| 第 {page} 页 / 共 {total_pages} 页）："
+        )
+        next_hint = (
+            f'*输入 /grep {subject_arg} -rag "{keyword}" {page + 1} 翻页'
+            if total_pages > 1
+            else None
+        )
+        self._reply(
+            event,
+            self._render_entries(
+                chunk,
+                page,
+                total_pages,
+                len(conversations) > 1,
+                header,
+                next_hint,
+            ),
+        )
+
+    def _pick_embedding_provider(self, providers: list[Any]) -> Any:
+        """按配置的 Provider ID 选嵌入模型，留空或找不到时用第一个。"""
+        wanted = str(self._raw("rag_embedding_provider", "") or "").strip()
+        if wanted:
+            for provider in providers:
+                config = getattr(provider, "provider_config", {}) or {}
+                provider_id = config.get("id") or getattr(provider, "provider_id", "")
+                if provider_id == wanted:
+                    return provider
+            logger.warning(f"[grep] 未找到嵌入模型 {wanted}，回退到第一个可用模型")
+        return providers[0]
+
+    async def _rag_vectors(
+        self,
+        cid: str,
+        history_raw: str | None,
+        texts: list[str],
+        provider: Any,
+    ) -> list[list[float]] | None:
+        """计算并缓存每个对话的轮次向量，历史长度变化时重算。"""
+        signature = (len(history_raw or ""), len(texts))
+        cached = self._rag_cache.get(cid)
+        if cached and cached[0] == signature:
+            return cached[1]
+        try:
+            vectors = await provider.get_embeddings_batch(texts)
+        except Exception:
+            logger.error(f"[grep] 批量向量计算失败: {traceback.format_exc()}")
+            return None
+        if len(vectors) != len(texts):
+            logger.error("[grep] 向量数量与文本数量不一致")
+            return None
+        if len(self._rag_cache) >= 8:
+            self._rag_cache.clear()
+        self._rag_cache[cid] = (signature, vectors)
+        return vectors
+
+    @filter.command("gettop")
+    async def cmd_gettop(self, event: AstrMessageEvent) -> None:
+        """查看当前对话的轮数"""
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        rounds = build_rounds(
+            load_history(conv.history),
+            strip_reminder=self._bool("strip_system_reminder", True),
+        )
+        self._reply(
+            event,
+            f"当前对话（{conv.title or '新对话'}）共 {len(rounds)} 轮。",
+        )
 
     @filter.command("show")
     async def cmd_show(self, event: AstrMessageEvent) -> None:

@@ -17,6 +17,30 @@
     "default": 600,
     "hint": "超过后本页其余结果会被省略并提示，防止长消息被平台风控。设为 0 表示不限制。"
   },
+  "grep_ai_max_rounds": {
+    "description": "/grep -ai 送给模型的候选轮次上限",
+    "type": "int",
+    "default": 100,
+    "hint": "只取前 N 轮作为候选，避免提示词过长；AI 模式最终只展示最多 3 条。"
+  },
+  "grep_ai_max_chars": {
+    "description": "/grep -ai 候选内容的总字数上限",
+    "type": "int",
+    "default": 12000,
+    "hint": "与轮次上限共同生效，超出后不再追加候选。设为 0 表示不限制。"
+  },
+  "rag_round_chars": {
+    "description": "/grep -rag 每轮参与向量计算的字数",
+    "type": "int",
+    "default": 500,
+    "hint": "轮次文本过长会截断，控制向量请求的开销。"
+  },
+  "rag_embedding_provider": {
+    "description": "/grep -rag 使用的嵌入模型",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用 AstrBot 中配置的第一个嵌入模型；填 Provider ID 可指定。"
+  },
   "show_delay_seconds": {
     "description": "/show 中 user 与 assistant 之间的间隔（秒）",
     "type": "int",
