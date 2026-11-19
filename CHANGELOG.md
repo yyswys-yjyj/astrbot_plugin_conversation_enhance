@@ -21,8 +21,10 @@
 
 - `/rewrite` 与 `/rewrite user|u` 改为走 AstrBot 官方消息链路：插件截断历史到本轮之前并\
   替换 `event.message_str`，由官方流程生成回复，不再自建 `llm_generate` 流水线；\
-  生成完成后通过 `after_message_sent` 把回复回填到对应版本，记录存于 \
+  生成完成后在 `on_llm_response` 钩子里把回复回填到对应版本，记录存于 \
   `data/plugin_data/astrbot_plugin_conversation_enhance/rewrite_versions.json`。
+- 自动标题改在 `on_llm_response` 触发：AstrBot 采用洋葱式调度，`after_message_sent` 时\
+  本轮历史尚未写库，旧实现在第一轮读不到对话内容，标题不会生成。
 
 ## [1.1.0] - 2026-11-18
 

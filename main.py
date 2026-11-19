@@ -1027,9 +1027,15 @@ class ConversationEnhance(Star):
             return
         self._reply(event, f"已生成标题：{title}")
 
-    @filter.after_message_sent()
-    async def auto_title(self, event: AstrMessageEvent) -> None:
-        """第一轮对话结束后自动生成标题。"""
+    @filter.on_llm_response()
+    async def auto_title(self, event: AstrMessageEvent, resp: Any) -> None:
+        """第一轮对话结束后自动生成标题。
+
+        选用 on_llm_response 而不是 after_message_sent：AstrBot 的洋葱式调度里，
+        本轮历史要等响应阶段结束后才写库，发送后钩子读到的历史不含本轮。
+        """
+        if event.get_extra("_rewrite_launched"):
+            return
         if not self._title_enabled():
             return
         if not self._permission_ok(event, "title_auto", notify=False):
@@ -1041,19 +1047,39 @@ class ConversationEnhance(Star):
         if conv.title and conv.title != "新对话":
             return  # 已有标题，不覆盖
 
-        rounds = build_rounds(
+        # 此时本轮还没入库，历史为空才说明这是第一轮
+        existing = build_rounds(
             load_history(conv.history),
             strip_reminder=self._bool("strip_system_reminder", True),
         )
-        if len(rounds) != 1 or not rounds[0].user_texts:
+        if existing:
             return
 
-        title = await self._generate_title(event, rounds)
-        if not title:
+        reply_text = str(getattr(resp, "completion_text", "") or "").strip()
+        if not event.message_str or not reply_text:
             return
+        # 放到后台生成，避免额外的一次 LLM 请求拖慢本轮回复
+        asyncio.create_task(
+            self._auto_title_task(event, conv.cid, event.message_str, reply_text)
+        )
+
+    async def _auto_title_task(
+        self, event: AstrMessageEvent, cid: str, user_text: str, reply_text: str
+    ) -> None:
+        """后台生成第一轮标题并写回对话。"""
         try:
+            current = Round(
+                number=1,
+                start=0,
+                end=0,
+                user_texts=[user_text],
+                assistant_texts=[reply_text],
+            )
+            title = await self._generate_title(event, [current])
+            if not title:
+                return
             await self.context.conversation_manager.update_conversation(
-                event.unified_msg_origin, conv.cid, title=title
+                event.unified_msg_origin, cid, title=title
             )
             logger.info(f"[title] 已自动生成标题：{title}")
         except Exception:
@@ -1148,6 +1174,10 @@ class ConversationEnhance(Star):
         self._save_rewrite_store()
 
         event.message_str = user_text
+        try:
+            event.set_extra("_rewrite_launched", True)  # 让自动标题跳过本事件
+        except Exception:
+            pass
         try:
             if getattr(event, "message_obj", None) is not None:
                 event.message_obj.message_str = user_text
@@ -1252,9 +1282,15 @@ class ConversationEnhance(Star):
         self._save_rewrite_store()
         self._reply(event, "已恢复原版" if number == 0 else f"已切换到第 {number} 版")
 
-    @filter.after_message_sent()
-    async def capture_rewrite_reply(self, event: AstrMessageEvent) -> None:
-        """重写触发的回复生成完成后，把回复文本记进对应版本。"""
+    @filter.on_llm_response()
+    async def capture_rewrite_reply(
+        self, event: AstrMessageEvent, resp: Any
+    ) -> None:
+        """重写请求的回复生成完成后，把回复正文记进对应版本。
+
+        AstrBot 在响应阶段结束后才把本轮历史写库，所以这里直接从 LLM 响应
+        取回复原文，不依赖 conv.history 是否已经更新。
+        """
         umo = event.unified_msg_origin
         pending = self._pending_rewrite.get(umo)
         if not pending:
@@ -1262,33 +1298,15 @@ class ConversationEnhance(Star):
         # 只认发起重写的那个事件，避免同会话的其他消息抢占回填
         if pending.get("event") is not event:
             return
-        conv = await self._silent_conversation(event)
-        if conv is None or conv.cid != pending.get("cid"):
-            return
 
-        history = self._history_list(conv.history)
-        base_len = int(pending.get("base_len") or 0)
-        last_user_idx, last_user = self._find_last_by_role(history, "user")
-        if last_user is None or last_user_idx < base_len:
-            return
-        user_text, _ = self._split_content(last_user.get("content"))
-        # 官方请求可能附带图片/文件等文本片段，用包含关系判断而不是全等
-        expected = inline(str(pending.get("user") or ""))
-        if expected and expected not in inline(user_text):
-            return
-
-        text = ""
-        for msg in history[last_user_idx + 1 :]:
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                candidate, _ = self._split_content(msg.get("content"))
-                if candidate:
-                    text = candidate
-        if not text:
-            return
-
+        text = str(getattr(resp, "completion_text", "") or "").strip()
         self._pending_rewrite.pop(umo, None)
+        if not text:
+            logger.warning("[rewrite] 本次重写没有拿到回复文本")
+            return
+
         store = self._load_rewrite_store()
-        rec = store.get(umo, {}).get(conv.cid)
+        rec = store.get(umo, {}).get(str(pending.get("cid") or ""))
         if not isinstance(rec, dict):
             return
 
@@ -1302,6 +1320,8 @@ class ConversationEnhance(Star):
             if 0 <= index < len(versions):
                 versions[index]["assistant"] = text
                 rec["current"] = version
+            else:
+                return
         self._save_rewrite_store()
         logger.info(f"[rewrite] 已记录第 {version} 版回复（{len(text)} 字）")
 
