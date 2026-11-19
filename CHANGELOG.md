@@ -23,9 +23,7 @@
   替换 `event.message_str`，由官方流程生成回复，不再自建 `llm_generate` 流水线；\
   生成完成后在 `on_llm_response` 钩子里把回复回填到对应版本。
 - 版本记录只做内存暂存（插件实例内字典，按会话与对话 ID 分开），不落盘；\
-  按「撤回」插件的方式在 `on_astrbot_loaded` 启动后台清理任务（每 60 秒清理超过 30 分钟\
-  未更新的记录），`terminate` 时取消任务并清空暂存。\
-  若生成失败导致历史停在截断处，仍可用 `/rewrite set 0` 从暂存恢复原轮次。
+  插件重载/停用触发 `terminate` 时清空，与「撤回」插件 `last_bot_messages` 的做法一致。
 - 自动标题改在 `on_llm_response` 触发：AstrBot 采用洋葱式调度，`after_message_sent` 时\
   本轮历史尚未写库，旧实现在第一轮读不到对话内容，标题不会生成。
 

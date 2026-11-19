@@ -12,7 +12,6 @@ import asyncio
 import json
 import re
 import shlex
-import time
 import traceback
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -56,10 +55,6 @@ SUBJECT_ALIASES = {
 }
 
 PLUGIN_NAME = "astrbot_plugin_conversation_enhance"
-
-#: /rewrite 版本暂存过期时间（秒）与清理间隔，做法同「撤回」插件
-REWRITE_EXPIRE_SECONDS = 1800
-CLEANUP_INTERVAL = 60
 
 #: /addprompt 的位置别名：front 插在默认提示词之前，tail 插在其后。
 PROMPT_POSITIONS = {
@@ -404,64 +399,6 @@ class ConversationEnhance(Star):
         self._rewrite_store: dict[str, dict] = {}
         #: 等待官方链路回填回复的重写任务：umo -> 任务
         self._pending_rewrite: dict[str, dict] = {}
-        #: 过期清理任务（同「撤回」插件的后台清理循环）
-        self._cleanup_task: asyncio.Task | None = None
-
-    # ------------------------------------------------------------- 暂存生命周期
-
-    @filter.on_astrbot_loaded()
-    async def start_cleanup(self) -> None:
-        """AstrBot 加载完成后启动过期清理任务。"""
-        if self._cleanup_task is None:
-            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-            logger.debug("[rewrite] 暂存清理任务已启动")
-
-    async def _cleanup_loop(self) -> None:
-        """定期清理过期的版本记录与挂起的重写任务。"""
-        while True:
-            try:
-                await asyncio.sleep(CLEANUP_INTERVAL)
-                cleaned = self._cleanup_expired()
-                if cleaned:
-                    logger.info(f"[rewrite] 已清理 {cleaned} 条过期暂存记录")
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.error(f"[rewrite] 清理暂存失败: {traceback.format_exc()}")
-
-    def _cleanup_expired(self, expire_seconds: float = REWRITE_EXPIRE_SECONDS) -> int:
-        """删除超过 expire_seconds 未更新的版本记录与挂起任务。"""
-        now = time.time()
-        cleaned = 0
-        for umo in list(self._rewrite_store):
-            umo_map = self._rewrite_store.get(umo) or {}
-            for cid in list(umo_map):
-                rec = umo_map.get(cid)
-                updated = float((rec or {}).get("updated_at") or 0)
-                if not updated or now - updated > expire_seconds:
-                    umo_map.pop(cid, None)
-                    cleaned += 1
-            if not umo_map:
-                self._rewrite_store.pop(umo, None)
-
-        for umo, pending in list(self._pending_rewrite.items()):
-            started = float(pending.get("ts") or 0)
-            if not started or now - started > expire_seconds:
-                self._pending_rewrite.pop(umo, None)
-                cleaned += 1
-        return cleaned
-
-    async def terminate(self) -> None:
-        """插件卸载/停用时停掉清理任务并清空内存暂存。"""
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-            self._cleanup_task = None
-        self._rewrite_store.clear()
-        self._pending_rewrite.clear()
 
     # ------------------------------------------------------------------ 指令
 
@@ -1232,7 +1169,6 @@ class ConversationEnhance(Star):
             "content": content,
             "base_len": base_len,
             "event": event,
-            "ts": time.time(),
         }
 
         event.message_str = user_text
@@ -1273,11 +1209,8 @@ class ConversationEnhance(Star):
                 },
                 "versions": [],
                 "current": 0,
-                "updated_at": time.time(),
             }
             umo_map[cid] = rec
-        else:
-            rec["updated_at"] = time.time()
         return rec
 
     async def _handle_rewrite_version(
@@ -1291,18 +1224,13 @@ class ConversationEnhance(Star):
         last_user_idx, _ = self._find_last_by_role(history, "user")
         rec = self._rewrite_store.get(event.unified_msg_origin, {}).get(conv.cid)
 
-        # 正常时 base_len 指向当前轮的 user；若上一次生成失败导致历史停在截断后的
-        # base_len 处，last_user_idx 会比 base_len 小 1，此时也要认这条记录，
-        # 这样 /rewrite set 0 才能把原轮次恢复回来。
-        base_len = int(rec.get("base_len", -1)) if isinstance(rec, dict) else -1
-        if base_len not in {last_user_idx, last_user_idx + 1}:
+        if not isinstance(rec, dict) or int(rec.get("base_len", -1)) != last_user_idx:
             if action == "get":
                 self._reply(event, "[rewrite] 当前已重写 0 次，现在是原版")
             else:
                 self._reply(event, "[rewrite] 还没有重写记录，当前是原版")
             return
 
-        rec["updated_at"] = time.time()
         versions = rec.get("versions") or []
         total = len(versions)
         current = int(rec.get("current") or 0)
@@ -1326,6 +1254,7 @@ class ConversationEnhance(Star):
             self._reply(event, text)
             return
 
+        base_len = int(rec.get("base_len") or 0)
         restored = history[:base_len]
         restored.append({"role": "user", "content": entry.get("content")})
         if entry.get("assistant"):
@@ -1345,7 +1274,6 @@ class ConversationEnhance(Star):
             return
 
         rec["current"] = number
-        rec["updated_at"] = time.time()
         self._pending_rewrite.pop(event.unified_msg_origin, None)
         self._reply(event, "已恢复原版" if number == 0 else f"已切换到第 {number} 版")
 
@@ -1388,7 +1316,6 @@ class ConversationEnhance(Star):
                 rec["current"] = version
             else:
                 return
-        rec["updated_at"] = time.time()
         logger.info(f"[rewrite] 已记录第 {version} 版回复（{len(text)} 字）")
 
     async def _handle_ai_rewrite(
@@ -1468,7 +1395,12 @@ class ConversationEnhance(Star):
 
     # ---- 重写版本暂存 ----
     # 版本记录只放在 self._rewrite_store（内存字典），随插件生命周期，
-    # 重载/停用即清空；清理任务与过期策略见 _cleanup_loop / _cleanup_expired。
+    # 重载/停用即清空；与「撤回」插件的 last_bot_messages 同一套做法。
+
+    async def terminate(self) -> None:
+        """插件卸载/停用时清空内存中的暂存数据。"""
+        self._rewrite_store.clear()
+        self._pending_rewrite.clear()
 
     async def _current_conversation(self, event: AstrMessageEvent) -> Any:
         """取当前对话，没有则回复提示并返回 None。"""
