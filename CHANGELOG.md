@@ -15,6 +15,9 @@
 - 配置项 `title_enabled`（默认关闭）、`title_max_chars`（默认 20）、
   `title_auto_permission` 与 `title_retitle_permission`（各自独立的群聊开关与黑白名单）。
 - `/gettop`：查看当前对话的轮数，无需额外配置。
+- `/aicomment "要求"`：取当前对话最近若干轮，按用户要求让模型复述或评论，
+  只调用一次 LLM，不写入对话历史；配套配置 `comment_max_rounds`、`comment_round_chars`
+  与 `aicomment_permission`。
 - `/grep -ai "检索词"`：把候选轮次交给 LLM 挑选，最多展示 3 条。
 - `/grep -rag "检索词" [页码]`：用 AstrBot 配置的嵌入模型做向量检索，按相似度排序、分页并显示相似度。
 - 配置项 `grep_ai_max_rounds`、`grep_ai_max_chars`、`rag_round_chars`、`rag_embedding_provider`。

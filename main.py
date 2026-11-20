@@ -35,6 +35,7 @@ from .rounds import (
     inline,
     load_history,
     round_matches,
+    truncate,
 )
 
 USAGE_GREP = (
@@ -45,6 +46,13 @@ USAGE_GREP = (
 )
 USAGE_SHOW = "用法：/show 轮次，例如 /show 3"
 USAGE_FORK = "用法：/fork 轮次，例如 /fork 3（把第 1~3 轮复制成新分支）"
+USAGE_AICOMMENT = (
+    '用法：/aicomment "要求"，例如 /aicomment "用三句话复述这段对话"'
+)
+AICOMMENT_SYSTEM_PROMPT = (
+    "你在阅读一段用户与 AI 的对话记录。请严格按照用户的要求复述或评论这段对话，"
+    "只输出结果本身，不要复述要求，也不要提及这些指令。"
+)
 
 SUBJECT_ALIASES = {
     "user": "user",
@@ -821,6 +829,84 @@ class ConversationEnhance(Star):
             event,
             f"当前对话（{conv.title or '新对话'}）共 {len(rounds)} 轮。",
         )
+
+    @filter.command("aicomment")
+    async def cmd_aicomment(self, event: AstrMessageEvent) -> None:
+        """让 AI 按指定要求复述或评论当前对话"""
+        if not self._permission_ok(event, "aicomment"):
+            return
+
+        requirement = _parse_prompt_text(
+            re.sub(
+                r"^\s*[^\w]?aicomment\b",
+                "",
+                event.message_str or "",
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        )
+        if not requirement:
+            self._reply(event, USAGE_AICOMMENT)
+            return
+
+        conv = await self._current_conversation(event)
+        if conv is None:
+            return
+        rounds = build_rounds(
+            load_history(conv.history),
+            strip_reminder=self._bool("strip_system_reminder", True),
+        )
+        if not rounds:
+            self._reply(event, "当前对话还没有历史记录，无法评论。")
+            return
+
+        max_rounds = max(1, self._int("comment_max_rounds", 20))
+        per_round = max(50, self._int("comment_round_chars", 300))
+        lines: List[str] = []
+        for index, round_ in enumerate(rounds[-max_rounds:], start=1):
+            if round_.user_text:
+                lines.append(
+                    f"[{index}] 用户：{truncate(inline(round_.user_text), per_round)}"
+                )
+            if round_.assistant_text:
+                lines.append(
+                    f"[{index}] AI：{truncate(inline(round_.assistant_text), per_round)}"
+                )
+        if not lines:
+            self._reply(event, "当前对话没有可用的文本内容。")
+            return
+
+        prompt = (
+            "以下是当前对话记录：\n\n"
+            + "\n".join(lines)
+            + f"\n\n要求：{requirement}"
+        )
+        try:
+            prov_id = await self.context.get_current_chat_provider_id(
+                event.unified_msg_origin
+            )
+            resp = await self.context.llm_generate(
+                chat_provider_id=prov_id,
+                contexts=[
+                    SystemMessageSegment(
+                        content=[TextPart(text=AICOMMENT_SYSTEM_PROMPT)]
+                    ),
+                    UserMessageSegment(content=[TextPart(text=prompt)]),
+                ],
+            )
+        except asyncio.TimeoutError:
+            self._reply(event, "[FAIL] 调用 LLM 超时")
+            return
+        except Exception:
+            logger.error(f"[aicomment] 调用 LLM 失败: {traceback.format_exc()}")
+            self._reply(event, "[FAIL] 调用 LLM 失败")
+            return
+
+        text = str(getattr(resp, "completion_text", "") or "").strip()
+        if not text:
+            self._reply(event, "[FAIL] 模型返回空回复")
+            return
+        self._reply(event, text)
 
     @filter.command("show")
     async def cmd_show(self, event: AstrMessageEvent) -> None:

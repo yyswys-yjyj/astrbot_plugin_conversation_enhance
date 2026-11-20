@@ -12,6 +12,7 @@
 |------|------|
 | `/grep [user\|u\|ai\|a] ["-ai"\|"-rag"] "检索词" [页码]` | 跨对话检索轮次，支持子串 / AI / RAG 三种模式 |
 | `/gettop` | 查看当前对话的轮数 |
+| `/aicomment "要求"` | 让 AI 按要求复述或评论当前对话（调用一次 LLM） |
 | `/show 轮次` | 原样回看某一轮：先发 user，隔 10 秒再按条发 AI |
 | `/fork 轮次` | 把第 1~N 轮复制成新对话，标题 `原标题-分支` |
 | `/rewrite` | 重发：让 AstrBot 官方链路重新生成当前版本的回复 |
@@ -49,6 +50,15 @@
 ## /gettop
 
 - 返回当前对话的轮数，便于配合 `/show`、`/fork` 使用；不需要额外配置。
+
+## /aicomment
+
+- `/aicomment "要求"`：取当前对话最近 `comment_max_rounds` 轮（默认 20），
+  每段截断到 `comment_round_chars`（默认 300）字，连同要求一起交给模型，
+  由它复述或评论这段对话；只调用一次 LLM，不写入对话历史。
+- 要求支持中英文引号与直角引号，可含空格；不写要求时提示用法。
+- 素材来自当前对话，`<system_reminder>` 等内部块会先被去掉。
+- 权限走 `aicomment_permission`（群聊开关 + ID 黑白名单，默认群聊可用）。
 
 ## /show 与 /fork
 
@@ -119,6 +129,8 @@
 | `rag_round_chars` | int | 500 | `/grep -rag` 每轮参与向量计算的字数 |
 | `rag_embedding_provider` | string | 空 | 指定嵌入模型 Provider ID，留空取第一个 |
 | `show_delay_seconds` | int | 10 | `/show` 中 user 与 AI 之间的间隔 |
+| `comment_max_rounds` | int | 20 | `/aicomment` 送给模型的最近轮次数 |
+| `comment_round_chars` | int | 300 | `/aicomment` 每轮内容截断字数 |
 | `grep_scope` | string | all | `all` = 当前会话下所有对话；`current` = 仅当前对话 |
 | `strip_system_reminder` | bool | true | 展示时去掉 `<system_reminder>` 块 |
 | `allow_modify_assistant` | bool | true | 是否允许 `/rewrite ai` |
@@ -129,7 +141,7 @@
 
 ## 权限配置
 
-每个指令/功能独立配置（`grep_permission` / `show_permission` / `fork_permission` / `rewrite_permission` / `prompt_permission` / `title_auto_permission` / `title_retitle_permission`）：
+每个指令/功能独立配置（`grep_permission` / `show_permission` / `fork_permission` / `rewrite_permission` / `aicomment_permission` / `prompt_permission` / `title_auto_permission` / `title_retitle_permission`）：
 
 | 字段 | 说明 |
 |------|------|

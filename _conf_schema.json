@@ -41,6 +41,18 @@
     "default": "",
     "hint": "留空使用 AstrBot 中配置的第一个嵌入模型；填 Provider ID 可指定。"
   },
+  "comment_max_rounds": {
+    "description": "/aicomment 送给模型的最近轮次数",
+    "type": "int",
+    "default": 20,
+    "hint": "只取最近 N 轮对话作为评论素材，避免提示词过长。"
+  },
+  "comment_round_chars": {
+    "description": "/aicomment 每轮内容截断字数",
+    "type": "int",
+    "default": 300,
+    "hint": "单条用户/AI 文本超过该字数会被截断。"
+  },
   "show_delay_seconds": {
     "description": "/show 中 user 与 assistant 之间的间隔（秒）",
     "type": "int",
@@ -270,6 +282,32 @@
         "type": "bool",
         "default": false,
         "hint": "默认仅私聊可用；开启后群聊里也能改写对话。"
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "off",
+        "options": ["off", "whitelist", "blacklist"],
+        "labels": ["不限制", "白名单", "黑名单"],
+        "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "ids": {
+        "description": "名单内的 ID",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "可填发送者 ID、会话 UMO（如 default:FriendMessage:123）或群号，命中任一即算在名单内。"
+      }
+    }
+  },
+  "aicomment_permission": {
+    "description": "/aicomment 权限",
+    "type": "object",
+    "items": {
+      "allow_group": {
+        "description": "允许在群聊中使用",
+        "type": "bool",
+        "default": true
       },
       "mode": {
         "description": "名单模式",
