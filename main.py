@@ -62,8 +62,6 @@ PLUGIN_NAME = "astrbot_plugin_conversation_enhance"
 #: 重写版本暂存过期时间（分钟）与后台清理间隔（秒），与「遗忘」插件一致。
 REWRITE_EXPIRE_MINUTES = 30
 CLEANUP_INTERVAL_SECONDS = 300
-#: 重写后等待官方链路回填的兜底时间（秒），超时则恢复被截断的原轮次。
-REWRITE_WATCHDOG_SECONDS = 180
 
 
 @dataclass
@@ -78,7 +76,6 @@ class RewriteRecord:
     original_content: Any
     original_assistant: str = ""
     versions: List[dict] = field(default_factory=list)
-    original_tail: List[dict] = field(default_factory=list)
     current: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -438,8 +435,6 @@ class ConversationEnhance(Star):
         self._rewrite_lock = asyncio.Lock()
         #: 后台清理任务（同遗忘插件，随插件加载启动、terminate 时取消）
         self._cleanup_task: asyncio.Task | None = None
-        #: 重写看门狗任务集合，避免被 GC
-        self._watchdogs: set[asyncio.Task] = set()
         try:
             asyncio.get_running_loop()
         except RuntimeError:  # 没有运行中的事件循环（如单测直接构造）
@@ -1450,15 +1445,6 @@ class ConversationEnhance(Star):
             "base_len": base_len,
             "event": event,
         }
-        try:
-            task = asyncio.create_task(
-                self._watchdog_restore(event.unified_msg_origin, conv.cid, version)
-            )
-            self._watchdogs.add(task)
-            self._pending_rewrite[event.unified_msg_origin]["watchdog"] = task
-            task.add_done_callback(self._watchdogs.discard)
-        except RuntimeError:  # 无事件循环（单测）
-            pass
 
         event.message_str = user_text
         try:
@@ -1479,49 +1465,8 @@ class ConversationEnhance(Star):
         return True
 
     def _drop_pending(self, umo: str) -> None:
-        """清掉挂起的重写任务，并取消其看门狗。"""
-        pending = self._pending_rewrite.pop(umo, None)
-        task = (pending or {}).get("watchdog")
-        if task is not None and not task.done():
-            task.cancel()
-
-    async def _watchdog_restore(
-        self, umo: str, cid: str, version: int, delay: float | None = None
-    ) -> None:
-        """超时仍未回填时，把被截断的原轮次恢复回对话历史。"""
-        try:
-            wait = REWRITE_WATCHDOG_SECONDS if delay is None else delay
-            await asyncio.sleep(wait)
-            pending = self._pending_rewrite.get(umo)
-            if (
-                not pending
-                or pending.get("cid") != cid
-                or int(pending.get("version") or 0) != version
-            ):
-                return
-            async with self._rewrite_lock:
-                rec = (self._rewrite_store.get(umo) or {}).get(cid)
-            self._drop_pending(umo)
-            if rec is None:
-                return
-
-            conv = await self.context.conversation_manager.get_conversation(umo, cid)
-            if conv is None:
-                return
-            current = self._history_list(conv.history)
-            if len(current) > int(rec.base_len or 0):
-                # 本轮其实已经写入（只是没抓到回填），不要覆盖
-                logger.info("[rewrite] 看门狗：本轮已生成，跳过恢复")
-                return
-            restored = current[: int(rec.base_len or 0)] + list(rec.original_tail)
-            await self.context.conversation_manager.update_conversation(
-                umo, cid, history=restored
-            )
-            logger.warning("[rewrite] 未检测到重写回复，已恢复原轮次历史")
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.error(f"[rewrite] 看门狗恢复失败: {traceback.format_exc()}")
+        """清掉挂起的重写任务。"""
+        self._pending_rewrite.pop(umo, None)
 
     async def _turn_record(
         self, umo: str, cid: str, history: List[dict], last_user_idx: int
@@ -1543,7 +1488,6 @@ class ConversationEnhance(Star):
                     base_len=last_user_idx,
                     original_content=last_user.get("content"),
                     original_assistant=assistant_text,
-                    original_tail=list(history[last_user_idx:]),
                 )
                 cid_map[cid] = rec
             else:
@@ -1754,9 +1698,6 @@ class ConversationEnhance(Star):
             except asyncio.CancelledError:
                 pass
             self._cleanup_task = None
-        for task in list(self._watchdogs):
-            task.cancel()
-        self._watchdogs.clear()
         async with self._rewrite_lock:
             self._rewrite_store.clear()
         self._pending_rewrite.clear()
