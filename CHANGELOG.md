@@ -26,6 +26,9 @@
 - `/rewrite view n`：预览第 n 次重写版本的回复原文。
 - 配置项 `rewrite_mode`：`astrbot`（默认，官方链路，可调用工具）/ `plugin`
   （插件内置流水线，不调用工具，但不受 CmdMask 的 `call_llm` 标记影响）。
+- 配额（时间流动控制）：所有权限组新增 `rate_enabled`、`rate_limit_minutes`、
+  `rate_limit_count`，按「每 N 分钟最多 M 次」限制单个用户/群，UNIX 时间戳滑动窗口、
+  记录懒加载于 `quotas.json`；指令成功后才记录，失败与用法提示不消耗配额。
 
 ### Changed
 

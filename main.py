@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import re
 import shlex
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -70,6 +72,38 @@ PLUGIN_NAME = "astrbot_plugin_conversation_enhance"
 #: 重写版本暂存过期时间（分钟）与后台清理间隔（秒），与「遗忘」插件一致。
 REWRITE_EXPIRE_MINUTES = 30
 CLEANUP_INTERVAL_SECONDS = 300
+
+#: 配额记录的默认窗口与次数（配置未填时使用）
+QUOTA_DEFAULT_MINUTES = 1
+QUOTA_DEFAULT_COUNT = 5
+#: 指令失败时打的标记，避免失败请求消耗配额
+QUOTA_FAILED_FLAG = "_quota_failed"
+
+
+def _quota_guard(command: str):
+    """给指令加配额检查：先查窗口，执行成功后才记录时间戳。"""
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+            if not await self._quota_check(event, command):
+                return
+            try:
+                event.set_extra(QUOTA_FAILED_FLAG, False)
+            except Exception:
+                pass
+            await func(self, event, *args, **kwargs)
+            failed = False
+            try:
+                failed = bool(event.get_extra(QUOTA_FAILED_FLAG))
+            except Exception:
+                pass
+            if not failed:
+                await self._quota_commit(event, command)
+
+        return wrapper
+
+    return decorator
 
 
 @dataclass
@@ -437,6 +471,10 @@ class ConversationEnhance(Star):
         self._rag_cache: dict[str, tuple[tuple[int, int], list[list[float]]]] = {}
         #: 重写版本暂存：umo -> cid -> RewriteRecord（仅内存，随插件生命周期）
         self._rewrite_store: dict[str, dict[str, RewriteRecord]] = {}
+        #: 指令配额记录（懒加载：首次访问才读磁盘）
+        self._quotas: dict[str, list[float]] | None = None
+        #: 配额读写锁
+        self._quota_lock = asyncio.Lock()
         #: 等待官方链路回填回复的重写任务：umo -> 任务
         self._pending_rewrite: dict[str, dict] = {}
         #: 暂存并发锁（同遗忘插件）
@@ -497,6 +535,7 @@ class ConversationEnhance(Star):
     # ------------------------------------------------------------------ 指令
 
     @filter.command("grep")
+    @_quota_guard("grep")
     async def cmd_grep(self, event: AstrMessageEvent) -> None:
         """按关键词检索对话轮次"""
         if not self._permission_ok(event, "grep"):
@@ -831,6 +870,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("aicomment")
+    @_quota_guard("aicomment")
     async def cmd_aicomment(self, event: AstrMessageEvent) -> None:
         """让 AI 按指定要求复述或评论当前对话"""
         if not self._permission_ok(event, "aicomment"):
@@ -909,6 +949,7 @@ class ConversationEnhance(Star):
         self._reply(event, text)
 
     @filter.command("show")
+    @_quota_guard("show")
     async def cmd_show(self, event: AstrMessageEvent) -> None:
         """原样回看指定轮次的完整对话"""
         if not self._permission_ok(event, "show"):
@@ -950,6 +991,7 @@ class ConversationEnhance(Star):
             await event.send(event.plain_result(text))
 
     @filter.command("fork")
+    @_quota_guard("fork")
     async def cmd_fork(self, event: AstrMessageEvent) -> None:
         """把前 N 轮复制成新的对话分支"""
         if not self._permission_ok(event, "fork"):
@@ -1002,6 +1044,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("rewrite")
+    @_quota_guard("rewrite")
     async def cmd_rewrite(self, event: AstrMessageEvent) -> None:
         """改写最后一条用户消息、重发，或切换/查看重写版本"""
         if not self._permission_ok(event, "rewrite"):
@@ -1074,6 +1117,7 @@ class ConversationEnhance(Star):
     # ---------------------------------------------------------- 提示词插入/覆盖
 
     @filter.command("showprompt")
+    @_quota_guard("prompt")
     async def cmd_showprompt(self, event: AstrMessageEvent) -> None:
         """查看本作用域已配置的提示词"""
         if not self._prompt_ready(event):
@@ -1099,6 +1143,7 @@ class ConversationEnhance(Star):
         self._reply(event, "\n".join(lines))
 
     @filter.command("addprompt")
+    @_quota_guard("prompt")
     async def cmd_addprompt(self, event: AstrMessageEvent) -> None:
         """在默认提示词前后追加内容"""
         if not self._prompt_ready(event):
@@ -1126,6 +1171,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("coverprompt")
+    @_quota_guard("prompt")
     async def cmd_coverprompt(self, event: AstrMessageEvent) -> None:
         """用新内容覆盖默认提示词"""
         if not self._prompt_ready(event):
@@ -1150,6 +1196,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("resetprompt")
+    @_quota_guard("prompt")
     async def cmd_resetprompt(self, event: AstrMessageEvent) -> None:
         """恢复默认提示词"""
         if not self._prompt_ready(event):
@@ -1173,6 +1220,7 @@ class ConversationEnhance(Star):
     # ---------------------------------------------------------- 自动会话标题
 
     @filter.command("retitle")
+    @_quota_guard("title_retitle")
     async def cmd_retitle(self, event: AstrMessageEvent) -> None:
         """基于当前对话的全部历史重新生成标题"""
         if not self._title_enabled():
@@ -1732,7 +1780,135 @@ class ConversationEnhance(Star):
 
     def _reply(self, event: AstrMessageEvent, text: str) -> None:
         """设置指令的返回文本（关闭文转图，避免长文本被渲染）。"""
+        # 失败、用法提示、功能未开启都不消耗配额，交给 _quota_guard 判断
+        if (
+            text.startswith("[FAIL]")
+            or text.startswith("用法：")
+            or "未开启" in text
+        ):
+            try:
+                event.set_extra(QUOTA_FAILED_FLAG, True)
+            except Exception:
+                pass
         event.set_result(MessageEventResult().message(text).use_t2i(False))
+
+    # ---- 指令配额（懒加载 + UNIX 时间戳） ----
+
+    def _quota_path(self) -> Path:
+        """配额数据文件：data/plugin_data/<插件名>/quotas.json。"""
+        return StarTools.get_data_dir(PLUGIN_NAME) / "quotas.json"
+
+    def _load_quotas(self) -> dict:
+        """懒加载：首次访问时才读磁盘。"""
+        if self._quotas is None:
+            self._quotas = self._read_quotas()
+        return self._quotas
+
+    def _read_quotas(self) -> dict:
+        try:
+            with self._quota_path().open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            logger.error(f"[quota] 读取配额失败: {traceback.format_exc()}")
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("[quota] quotas.json 不是对象，已忽略")
+            return {}
+        store: dict[str, list[float]] = {}
+        for key, stamps in data.items():
+            if not isinstance(stamps, list):
+                continue
+            store[str(key)] = [
+                float(ts) for ts in stamps if isinstance(ts, (int, float))
+            ]
+        return store
+
+    def _save_quotas(self) -> None:
+        try:
+            path = self._quota_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(self._quotas or {}, fh, ensure_ascii=False, indent=2)
+            tmp.replace(path)
+        except Exception:
+            logger.error(f"[quota] 保存配额失败: {traceback.format_exc()}")
+
+    @staticmethod
+    def _quota_scope(event: AstrMessageEvent) -> str:
+        """配额作用域：群聊按群号，私聊按用户 ID。"""
+        try:
+            group_id = event.get_group_id()
+        except Exception:
+            group_id = ""
+        if group_id:
+            return f"group:{group_id}"
+        try:
+            sender_id = event.get_sender_id()
+        except Exception:
+            sender_id = ""
+        if sender_id:
+            return f"user:{sender_id}"
+        return f"user:{event.unified_msg_origin}"
+
+    def _quota_settings(self, command: str) -> Optional[Tuple[int, int]]:
+        """取配额配置；未开启返回 None。"""
+        conf = self._permission_config(command)
+        if not self._as_bool(conf.get("rate_enabled"), False):
+            return None
+        try:
+            minutes = int(conf.get("rate_limit_minutes") or QUOTA_DEFAULT_MINUTES)
+        except (TypeError, ValueError):
+            minutes = QUOTA_DEFAULT_MINUTES
+        try:
+            count = int(conf.get("rate_limit_count") or QUOTA_DEFAULT_COUNT)
+        except (TypeError, ValueError):
+            count = QUOTA_DEFAULT_COUNT
+        return max(1, minutes), max(1, count)
+
+    async def _quota_check(self, event: AstrMessageEvent, command: str) -> bool:
+        """检查窗口内次数是否超限；只读，不写时间戳。"""
+        settings = self._quota_settings(command)
+        if settings is None:
+            return True
+        minutes, count = settings
+        window = minutes * 60
+        now = time.time()
+        key = f"{self._quota_scope(event)}|{command}"
+
+        async with self._quota_lock:
+            stamps = [ts for ts in self._load_quotas().get(key, []) if now - ts < window]
+            if len(stamps) < count:
+                return True
+            wait = int(window - (now - min(stamps))) + 1
+
+        logger.info(f"[quota] {command} 超限：{key} 已用 {len(stamps)}/{count} 次")
+        self._reply(
+            event,
+            f"[FAIL] /{command} 使用过于频繁，请 {wait} 秒后再试"
+            f"（每 {minutes} 分钟最多 {count} 次）",
+        )
+        return False
+
+    async def _quota_commit(self, event: AstrMessageEvent, command: str) -> None:
+        """指令成功后记录时间戳并落盘。"""
+        settings = self._quota_settings(command)
+        if settings is None:
+            return
+        minutes, _ = settings
+        window = minutes * 60
+        now = time.time()
+        key = f"{self._quota_scope(event)}|{command}"
+
+        async with self._quota_lock:
+            store = self._load_quotas()
+            stamps = [ts for ts in store.get(key, []) if now - ts < window]
+            stamps.append(now)
+            store[key] = stamps
+            self._save_quotas()
+        logger.info(f"[quota] {command} 已记录：{key} 共 {len(stamps)} 次")
 
     # ---- 提示词存储 ----
 

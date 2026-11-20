@@ -148,9 +148,22 @@
 | `enabled` | 仅 `prompt_permission` 有：提示词功能总开关，默认 `false` |
 | `allow_group` | 是否允许在群聊中使用；`/rewrite`、提示词功能、标题功能默认 `false`，其余默认 `true` |
 | `mode` | `off` 不限制 / `whitelist` 仅名单内可用 / `blacklist` 名单内禁用，同一指令只能选一种 |
+| `rate_enabled` | 使用指令时间流动控制（配额），默认 `false` |
+| `rate_limit_minutes` | 配额窗口，单位分钟，默认 1 |
+| `rate_limit_count` | 窗口内允许次数，默认 5 |
 | `ids` | 名单内容，可填发送者 ID、会话 UMO 或群号，命中任一即算在名单内 |
 
 判定顺序：先看群聊开关（群聊被禁用时静默忽略，避免刷屏），再按名单放行或拒绝（拒绝时回复「没有使用 xxx 的权限」）。
+
+### 配额（时间流动控制）
+
+- 打开某个权限组的 `rate_enabled` 后，该指令按「每 `rate_limit_minutes` 分钟最多 `rate_limit_count` 次」限制。
+- 作用域是**单个用户或单个群**：群聊按群号计，私聊按发送者 ID 计，不同指令各自独立计数。
+- 时间戳用 UNIX 时间做**滑动窗口**判断：只统计落在窗口内的记录，超限时回复还需等待的秒数。
+- 记录**懒加载**：首次用到时才读取 `data/plugin_data/astrbot_plugin_conversation_enhance/quotas.json`，
+  没有记录文件时不产生任何写盘。
+- **时序**：先检查窗口 → 未超限才执行指令 → 指令成功后才把当前时间戳追加并落盘；
+  失败、用法提示、功能未开启的请求不会消耗配额。
 
 ## 兼容性
 

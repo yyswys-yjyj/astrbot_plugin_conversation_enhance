@@ -122,6 +122,24 @@
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
       },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
+      },
       "ids": {
         "description": "名单内的 ID",
         "type": "list",
@@ -160,6 +178,24 @@
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
       },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
+      },
       "ids": {
         "description": "名单内的 ID",
         "type": "list",
@@ -185,6 +221,24 @@
         "options": ["off", "whitelist", "blacklist"],
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一功能只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
       },
       "ids": {
         "description": "名单内的 ID",
@@ -212,6 +266,24 @@
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
       },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
+      },
       "ids": {
         "description": "名单内的 ID",
         "type": "list",
@@ -238,6 +310,24 @@
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
       },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
+      },
       "ids": {
         "description": "名单内的 ID",
         "type": "list",
@@ -263,6 +353,24 @@
         "options": ["off", "whitelist", "blacklist"],
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
       },
       "ids": {
         "description": "名单内的 ID",
@@ -291,6 +399,24 @@
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
       },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
+      },
       "ids": {
         "description": "名单内的 ID",
         "type": "list",
@@ -316,6 +442,24 @@
         "options": ["off", "whitelist", "blacklist"],
         "labels": ["不限制", "白名单", "黑名单"],
         "hint": "同一指令只能选一种：off 不限制；whitelist 仅名单内可用；blacklist 名单内禁止。"
+      },
+      "rate_enabled": {
+        "description": "使用指令时间流动控制",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按下面的窗口与次数限制该指令的使用频率；关闭则不限制。"
+      },
+      "rate_limit_minutes": {
+        "description": "时间窗口（分钟）",
+        "type": "int",
+        "default": 1,
+        "hint": "与「窗口内允许次数」组合为「每 N 分钟允许 M 次」。"
+      },
+      "rate_limit_count": {
+        "description": "窗口内允许的次数",
+        "type": "int",
+        "default": 5,
+        "hint": "同一用户/群在该窗口内最多可用这么多次。"
       },
       "ids": {
         "description": "名单内的 ID",
