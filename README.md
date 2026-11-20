@@ -2,7 +2,7 @@
 
 围绕 **AI 与用户的对话历史** 提供增强能力：检索、回看、分支、改写、提示词插入/覆盖。
 
-> Power by serveryyswys · v1.2.0
+> Power by serveryyswys · v1.3.0
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
