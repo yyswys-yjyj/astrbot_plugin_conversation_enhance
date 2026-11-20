@@ -32,6 +32,8 @@
 - 会话黑白名单 `session_filter`：`on_waiting_llm_request` 钩子在 LLM 请求发出前按 UMO 判断，
   黑名单命中或白名单未命中时发送可配置的 `reason` 并 `stop_event()`，直接终止事件传播；
   支持 `*` / `?` 通配符与 `{umo}` 占位。
+- 同上名单同时作用于指令：所有指令外层统一守卫，被拦截的会话只返回 `reason`，
+  不执行指令逻辑、不消耗配额。
 
 ### Changed
 

@@ -86,12 +86,19 @@ QUOTA_DEFAULT_COUNT = 5
 QUOTA_FAILED_FLAG = "_quota_failed"
 
 
-def _quota_guard(command: str):
-    """给指令加配额检查：先查窗口，执行成功后才记录时间戳。"""
+def _command_guard(command: str):
+    """指令统一前置检查：会话黑白名单 → 配额 → 成功后再记录时间戳。"""
 
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+            reason = self._session_block_reason(event.unified_msg_origin)
+            if reason is not None:
+                logger.info(
+                    f"[session_filter] 拦截指令 /{command}：{event.unified_msg_origin}"
+                )
+                self._reply(event, reason)
+                return
             if not await self._quota_check(event, command):
                 return
             try:
@@ -552,7 +559,7 @@ class ConversationEnhance(Star):
     # ------------------------------------------------------------------ 指令
 
     @filter.command("grep")
-    @_quota_guard("grep")
+    @_command_guard("grep")
     async def cmd_grep(self, event: AstrMessageEvent) -> None:
         """按关键词检索对话轮次"""
         if not self._permission_ok(event, "grep"):
@@ -872,6 +879,7 @@ class ConversationEnhance(Star):
         return vectors
 
     @filter.command("gettop")
+    @_command_guard("gettop")
     async def cmd_gettop(self, event: AstrMessageEvent) -> None:
         """查看当前对话的轮数"""
         conv = await self._current_conversation(event)
@@ -887,7 +895,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("aicomment")
-    @_quota_guard("aicomment")
+    @_command_guard("aicomment")
     async def cmd_aicomment(self, event: AstrMessageEvent) -> None:
         """让 AI 按指定要求复述或评论当前对话"""
         if not self._permission_ok(event, "aicomment"):
@@ -966,7 +974,7 @@ class ConversationEnhance(Star):
         self._reply(event, text)
 
     @filter.command("show")
-    @_quota_guard("show")
+    @_command_guard("show")
     async def cmd_show(self, event: AstrMessageEvent) -> None:
         """原样回看指定轮次的完整对话"""
         if not self._permission_ok(event, "show"):
@@ -1008,7 +1016,7 @@ class ConversationEnhance(Star):
             await event.send(event.plain_result(text))
 
     @filter.command("fork")
-    @_quota_guard("fork")
+    @_command_guard("fork")
     async def cmd_fork(self, event: AstrMessageEvent) -> None:
         """把前 N 轮复制成新的对话分支"""
         if not self._permission_ok(event, "fork"):
@@ -1061,7 +1069,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("rewrite")
-    @_quota_guard("rewrite")
+    @_command_guard("rewrite")
     async def cmd_rewrite(self, event: AstrMessageEvent) -> None:
         """改写最后一条用户消息、重发，或切换/查看重写版本"""
         if not self._permission_ok(event, "rewrite"):
@@ -1114,6 +1122,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("rewrite_help")
+    @_command_guard("rewrite_help")
     async def cmd_rewrite_help(self, event: AstrMessageEvent) -> None:
         """查看 /rewrite 用法"""
         self._reply(
@@ -1134,7 +1143,7 @@ class ConversationEnhance(Star):
     # ---------------------------------------------------------- 提示词插入/覆盖
 
     @filter.command("showprompt")
-    @_quota_guard("prompt")
+    @_command_guard("prompt")
     async def cmd_showprompt(self, event: AstrMessageEvent) -> None:
         """查看本作用域已配置的提示词"""
         if not self._prompt_ready(event):
@@ -1160,7 +1169,7 @@ class ConversationEnhance(Star):
         self._reply(event, "\n".join(lines))
 
     @filter.command("addprompt")
-    @_quota_guard("prompt")
+    @_command_guard("prompt")
     async def cmd_addprompt(self, event: AstrMessageEvent) -> None:
         """在默认提示词前后追加内容"""
         if not self._prompt_ready(event):
@@ -1188,7 +1197,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("coverprompt")
-    @_quota_guard("prompt")
+    @_command_guard("prompt")
     async def cmd_coverprompt(self, event: AstrMessageEvent) -> None:
         """用新内容覆盖默认提示词"""
         if not self._prompt_ready(event):
@@ -1213,7 +1222,7 @@ class ConversationEnhance(Star):
         )
 
     @filter.command("resetprompt")
-    @_quota_guard("prompt")
+    @_command_guard("prompt")
     async def cmd_resetprompt(self, event: AstrMessageEvent) -> None:
         """恢复默认提示词"""
         if not self._prompt_ready(event):
@@ -1237,7 +1246,7 @@ class ConversationEnhance(Star):
     # ---------------------------------------------------------- 自动会话标题
 
     @filter.command("retitle")
-    @_quota_guard("title_retitle")
+    @_command_guard("title_retitle")
     async def cmd_retitle(self, event: AstrMessageEvent) -> None:
         """基于当前对话的全部历史重新生成标题"""
         if not self._title_enabled():
@@ -1278,38 +1287,46 @@ class ConversationEnhance(Star):
         选用 on_waiting_llm_request 而不是 on_llm_request：前者在构建请求之前，
         此时 send 一条理由并 stop_event，AstrBot 会直接跳过本次 LLM 请求。
         """
-        conf = self.config.get("session_filter") if self.config else None
-        if not isinstance(conf, dict):
-            return
-        if not self._as_bool(conf.get("enabled"), False):
-            return
-
-        mode = str(conf.get("mode") or "blacklist").strip().lower()
-        if mode not in {"blacklist", "whitelist"}:
-            return
-
         umo = event.unified_msg_origin
-        ids = conf.get("ids") or []
-        if isinstance(ids, str):
-            ids = [ids]
-        hit = any(
-            _umo_matches(umo, str(pattern).strip())
-            for pattern in ids
-            if str(pattern).strip()
-        )
-        blocked = hit if mode == "blacklist" else not hit
-        if not blocked:
+        reason = self._session_block_reason(umo)
+        if reason is None:
             return
-
-        reason = str(
-            conf.get("reason") or "当前会话已被限制使用 AI 对话，如有疑问请联系管理员。"
-        ).replace("{umo}", umo)
-        logger.info(f"[session_filter] 拦截 {umo}（mode={mode}, 命中={hit}）")
+        logger.info(f"[session_filter] 拦截 LLM 请求：{umo}")
         try:
             await event.send(MessageChain().message(reason))
         except Exception:
             logger.error(f"[session_filter] 发送拦截理由失败: {traceback.format_exc()}")
         event.stop_event()
+
+    def _session_filter_config(self) -> Optional[dict]:
+        """读取并规范化 session_filter 配置；未启用返回 None。"""
+        conf = self.config.get("session_filter") if self.config else None
+        if not isinstance(conf, dict):
+            return None
+        if not self._as_bool(conf.get("enabled"), False):
+            return None
+        mode = str(conf.get("mode") or "blacklist").strip().lower()
+        if mode not in {"blacklist", "whitelist"}:
+            return None
+        ids = conf.get("ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        patterns = [str(item).strip() for item in ids if str(item).strip()]
+        reason = str(
+            conf.get("reason") or "当前会话已被限制使用 AI 对话，如有疑问请联系管理员。"
+        )
+        return {"mode": mode, "ids": patterns, "reason": reason}
+
+    def _session_block_reason(self, umo: str) -> Optional[str]:
+        """按会话判断是否拦截；命中返回理由，否则返回 None。"""
+        conf = self._session_filter_config()
+        if conf is None:
+            return None
+        hit = any(_umo_matches(umo, pattern) for pattern in conf["ids"])
+        blocked = hit if conf["mode"] == "blacklist" else not hit
+        if not blocked:
+            return None
+        return conf["reason"].replace("{umo}", umo)
 
     @filter.on_llm_response()
     async def auto_title(self, event: AstrMessageEvent, resp: Any) -> None:
@@ -1837,7 +1854,7 @@ class ConversationEnhance(Star):
 
     def _reply(self, event: AstrMessageEvent, text: str) -> None:
         """设置指令的返回文本（关闭文转图，避免长文本被渲染）。"""
-        # 失败、用法提示、功能未开启都不消耗配额，交给 _quota_guard 判断
+        # 失败、用法提示、功能未开启都不消耗配额，交给 _command_guard 判断
         if (
             text.startswith("[FAIL]")
             or text.startswith("用法：")
