@@ -29,6 +29,9 @@
 - 配额（时间流动控制）：所有权限组新增 `rate_enabled`、`rate_limit_minutes`、
   `rate_limit_count`，按「每 N 分钟最多 M 次」限制单个用户/群，UNIX 时间戳滑动窗口、
   记录懒加载于 `quotas.json`；指令成功后才记录，失败与用法提示不消耗配额。
+- 会话黑白名单 `session_filter`：`on_waiting_llm_request` 钩子在 LLM 请求发出前按 UMO 判断，
+  黑名单命中或白名单未命中时发送可配置的 `reason` 并 `stop_event()`，直接终止事件传播；
+  支持 `*` / `?` 通配符与 `{umo}` 占位。
 
 ### Changed
 

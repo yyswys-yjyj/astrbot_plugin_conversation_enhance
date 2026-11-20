@@ -98,6 +98,39 @@
     "default": 200,
     "hint": "只影响展示，不影响实际注入；完整内容保存在 data/plugin_data 下的 prompts.json。"
   },
+  "session_filter": {
+    "description": "会话黑白名单（LLM 请求前按会话 UMO 拦截）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用会话黑白名单",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时不拦截任何会话。启用后在 LLM 请求发出前判断，命中拦截则直接终止本次事件传播。"
+      },
+      "mode": {
+        "description": "名单模式",
+        "type": "string",
+        "default": "blacklist",
+        "options": ["blacklist", "whitelist", "off"],
+        "labels": ["黑名单（命中即拦截）", "白名单（未命中即拦截）", "不限制"],
+        "hint": "blacklist：UMO 命中名单才拦截；whitelist：UMO 不在名单里就拦截。"
+      },
+      "ids": {
+        "description": "会话 UMO 名单",
+        "type": "list",
+        "items": {"type": "string"},
+        "default": [],
+        "hint": "填 unified_msg_origin，如 default:FriendMessage:123456；支持通配符，如 default:GroupMessage:* 或 *.GroupMessage:987654321。"
+      },
+      "reason": {
+        "description": "被拦截时返回的理由",
+        "type": "string",
+        "default": "当前会话已被限制使用 AI 对话，如有疑问请联系管理员。",
+        "hint": "会原样发送给用户，可用 {umo} 占位当前会话标识。"
+      }
+    }
+  },
   "prompt_permission": {
     "description": "提示词插入/覆盖（/showprompt、/addprompt、/coverprompt、/resetprompt）",
     "type": "object",

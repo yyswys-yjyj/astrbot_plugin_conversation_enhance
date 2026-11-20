@@ -139,6 +139,19 @@
 | `title_enabled` | bool | false | 自动标题与 `/retitle` 总开关 |
 | `title_max_chars` | int | 20 | 标题字数上限 |
 
+## 会话黑白名单
+
+比 AstrBot 内置平台白名单更细的一层：在 **LLM 请求发出前** 按会话 UMO 判断，命中拦截就直接终止本次事件传播。
+
+- 配置项 `session_filter`：`enabled`（默认 `false`）、`mode`（`blacklist` / `whitelist` / `off`）、
+  `ids`（UMO 列表）、`reason`（返回给用户的理由，支持 `{umo}` 占位）。
+- 判定：黑名单模式下 UMO 命中才拦截；白名单模式下 UMO 不在名单里就拦截。
+- `ids` 支持通配符：`default:FriendMessage:123456`、`default:GroupMessage:*`、
+  `*.GroupMessage:987654321` 都可用。
+- 钩子是 `on_waiting_llm_request`（构建请求之前）：拦截时先发送 `reason`，再 `stop_event()`，
+  AstrBot 会跳过本次 LLM 请求，也不会写入对话历史。
+- 只影响普通 LLM 对话；插件自身的查询类指令（`/grep`、`/show` 等）不经过这个钩子。
+
 ## 权限配置
 
 每个指令/功能独立配置（`grep_permission` / `show_permission` / `fork_permission` / `rewrite_permission` / `aicomment_permission` / `prompt_permission` / `title_auto_permission` / `title_retitle_permission`）：

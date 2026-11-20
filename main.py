@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import functools
 import json
 import re
@@ -21,7 +22,12 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event import (
+    AstrMessageEvent,
+    MessageChain,
+    MessageEventResult,
+    filter,
+)
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
@@ -409,6 +415,17 @@ def _parse_rewrite_args(
     if len(tokens) != 2:
         return None, None, None, "需要两个参数（若文本含空格，请使用引号或括号包裹）"
     return target, tokens[0], tokens[1], None
+
+
+def _umo_matches(umo: str, pattern: str) -> bool:
+    """判断 UMO 是否命中模式：精确匹配，或含 * / ? 时按通配符匹配。"""
+    if not pattern:
+        return False
+    if pattern == umo:
+        return True
+    if any(ch in pattern for ch in "*?["):
+        return fnmatch.fnmatchcase(umo, pattern)
+    return False
 
 
 def _parse_prompt_text(text: str) -> str:
@@ -1253,6 +1270,46 @@ class ConversationEnhance(Star):
             self._reply(event, "[FAIL] 标题已生成但保存失败")
             return
         self._reply(event, f"已生成标题：{title}")
+
+    @filter.on_waiting_llm_request()
+    async def check_session_filter(self, event: AstrMessageEvent) -> None:
+        """会话黑白名单：LLM 请求发出前按 UMO 判断，命中拦截就终止事件传播。
+
+        选用 on_waiting_llm_request 而不是 on_llm_request：前者在构建请求之前，
+        此时 send 一条理由并 stop_event，AstrBot 会直接跳过本次 LLM 请求。
+        """
+        conf = self.config.get("session_filter") if self.config else None
+        if not isinstance(conf, dict):
+            return
+        if not self._as_bool(conf.get("enabled"), False):
+            return
+
+        mode = str(conf.get("mode") or "blacklist").strip().lower()
+        if mode not in {"blacklist", "whitelist"}:
+            return
+
+        umo = event.unified_msg_origin
+        ids = conf.get("ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        hit = any(
+            _umo_matches(umo, str(pattern).strip())
+            for pattern in ids
+            if str(pattern).strip()
+        )
+        blocked = hit if mode == "blacklist" else not hit
+        if not blocked:
+            return
+
+        reason = str(
+            conf.get("reason") or "当前会话已被限制使用 AI 对话，如有疑问请联系管理员。"
+        ).replace("{umo}", umo)
+        logger.info(f"[session_filter] 拦截 {umo}（mode={mode}, 命中={hit}）")
+        try:
+            await event.send(MessageChain().message(reason))
+        except Exception:
+            logger.error(f"[session_filter] 发送拦截理由失败: {traceback.format_exc()}")
+        event.stop_event()
 
     @filter.on_llm_response()
     async def auto_title(self, event: AstrMessageEvent, resp: Any) -> None:
