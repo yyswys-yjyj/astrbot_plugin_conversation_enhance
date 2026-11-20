@@ -10,8 +10,10 @@
 ### Added
 
 - `/retitle`：按当前对话的全部历史重新生成标题。
-- 自动会话标题：第一轮对话结束后自动调用 LLM 生成标题，  标题会清理引号/标点/换行并按字数截断。
-- 配置项 `title_enabled`（默认关闭）、`title_max_chars`（默认 20）、  `title_auto_permission` 与 `title_retitle_permission`（各自独立的群聊开关与黑白名单）。
+- 自动会话标题：第一轮对话结束后自动调用 LLM 生成标题，
+  标题会清理引号/标点/换行并按字数截断。
+- 配置项 `title_enabled`（默认关闭）、`title_max_chars`（默认 20）、
+  `title_auto_permission` 与 `title_retitle_permission`（各自独立的群聊开关与黑白名单）。
 - `/gettop`：查看当前对话的轮数，无需额外配置。
 - `/grep -ai "检索词"`：把候选轮次交给 LLM 挑选，最多展示 3 条。
 - `/grep -rag "检索词" [页码]`：用 AstrBot 配置的嵌入模型做向量检索，按相似度排序、分页并显示相似度。
@@ -19,16 +21,25 @@
 - `/rewrite get`：查看当前轮已重写几次、现在是第几版。
 - `/rewrite set n`：切回第 n 次重写的版本（`0` 为原版）。
 - `/rewrite view n`：预览第 n 次重写版本的回复原文。
+- 配置项 `rewrite_mode`：`astrbot`（默认，官方链路，可调用工具）/ `plugin`
+  （插件内置流水线，不调用工具，但不受 CmdMask 的 `call_llm` 标记影响）。
 
 ### Changed
 
-- `/rewrite` 与 `/rewrite user|u` 改为走 AstrBot 官方消息链路：插件截断历史到本轮之前并  替换 `event.message_str`，由官方流程生成回复，不再自建 `llm_generate` 流水线；  生成完成后在 `on_llm_response` 钩子里把回复回填到对应版本。
-- 版本记录只做内存暂存（`RewriteRecord` 数据类 + `asyncio.Lock`，按会话与对话 ID 分开），  不落盘；参照「遗忘」插件：后台每 5 分钟清理超过 30 分钟未更新的记录，  下一条 LLM 请求开始时清掉上一轮暂存，`terminate` 时取消清理任务并清空。
-- 自动标题改在 `on_llm_response` 触发：AstrBot 采用洋葱式调度，`after_message_sent` 时  本轮历史尚未写库，旧实现在第一轮读不到对话内容，标题不会生成。
+- `/rewrite` 与 `/rewrite user|u` 默认改走 AstrBot 官方消息链路：插件截断历史到本轮之前并
+  替换 `event.message_str`，由官方流程生成回复；生成完成后在 `on_llm_response` 钩子里
+  把回复回填到对应版本。
+- 版本记录只做内存暂存（`RewriteRecord` 数据类 + `asyncio.Lock`，按会话与对话 ID 分开），
+  不落盘；参照「遗忘」插件：后台每 5 分钟清理超过 30 分钟未更新的记录，
+  下一条 LLM 请求开始时清掉上一轮暂存，`terminate` 时取消清理任务并清空。
+- 自动标题改在 `on_llm_response` 触发：AstrBot 采用洋葱式调度，`after_message_sent` 时
+  本轮历史尚未写库，旧实现在第一轮读不到对话内容，标题不会生成。
 
 ### Fixed
 
-- `/rewrite` 在 CmdMask 等插件改写指令后不生成回复的问题：这类插件会设置  `call_llm=True`，AstrBot 便不再进入 Agent 阶段，导致历史被截断却没有回复。  现在发起重写前会复位 `call_llm` 与唤醒标记，并跳过已有发送操作的事件。
+- `/rewrite` 在 CmdMask 等插件改写指令后不生成回复的问题：这类插件会设置 `call_llm=True`，
+  AstrBot 便不再进入 Agent 阶段，导致历史被截断却没有回复。现在发起重写前会复位
+  `call_llm` 与唤醒标记，并跳过已有发送操作的事件。
 - 新增 180 秒看门狗：重写超时仍未拿到回复时，自动把被截断的原轮次恢复回对话历史。
 
 ## [1.0.0] - 2026-11-14

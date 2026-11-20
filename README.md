@@ -59,14 +59,16 @@
 ## /rewrite
 
 - 默认仅私聊可用，群聊会被拦截（可用 `rewrite_permission.allow_group` 打开）。
-- 改写与重发都交回 **AstrBot 官方消息链路**：插件把历史截断到这一轮之前、\
-  替换 `event.message_str`，再由官方流程用同样的提示词、模型与会话状态生成回复，\
-  不再走插件自建的 `llm_generate` 流水线。
-- 兼容 CmdMask 这类「把别名改写成指令」的插件：它们会调用 `should_call_llm(True)`\
-  关闭默认 LLM 链路，`/rewrite` 发起前会复位该标记与唤醒状态，否则会截断历史却不生成回复。
-- 兜底：重写后 180 秒仍未拿到回复时，看门狗会把被截断的原轮次恢复回对话历史。
-- 每轮独立记录版本：原版为第 0 版，每次 `/rewrite u` 追加一版；官方链路生成完回复后\
-  由 `on_llm_response` 钩子把回复原文回填到该版本。
+- **两种生成链路**，由配置 `rewrite_mode` 选择：
+  - `astrbot`（默认）：把历史截断到这一轮之前、替换 `event.message_str`，\
+    交给 AstrBot 官方流程生成，能调用工具、继承人格与模型配置。
+  - `plugin`：插件直接调用 `llm_generate` 生成，不经过 Agent，**不能调用工具**，\
+    但不受 CmdMask 等插件的 `call_llm` 标记与官方调度条件影响。
+- 官方链路模式下兼容 CmdMask 这类「把别名改写成指令」的插件：它们会调用\
+  `should_call_llm(True)` 关闭默认 LLM 链路，`/rewrite` 发起前会复位该标记与唤醒状态。
+- 官方链路模式有 180 秒看门狗：仍未拿到回复时把被截断的原轮次恢复回对话历史。
+- 每轮独立记录版本：原版为第 0 版，每次 `/rewrite u` 追加一版；回复生成完成后\
+  写入该版本（官方链路走 `on_llm_response`，插件链路直接回写）。
 - `/rewrite get`：输出「当前已重写 n 次，现在是第 n 版」或「现在是原版」。
 - `/rewrite set n`：把对话历史切回第 n 版（`0` 为原版）；`/rewrite view n` 只预览该版回复原文。
 - `/rewrite ai` 只修正 AI 的记忆文本，不重新生成回复。
@@ -121,6 +123,7 @@
 | `grep_scope` | string | all | `all` = 当前会话下所有对话；`current` = 仅当前对话 |
 | `strip_system_reminder` | bool | true | 展示时去掉 `<system_reminder>` 块 |
 | `allow_modify_assistant` | bool | true | 是否允许 `/rewrite ai` |
+| `rewrite_mode` | string | astrbot | `/rewrite` 生成链路：`astrbot` 官方链路（可调用工具）/ `plugin` 插件内置流水线（不调用工具） |
 | `prompt_preview_chars` | int | 200 | `/showprompt` 每条内容的预览字数 |
 | `title_enabled` | bool | false | 自动标题与 `/retitle` 总开关 |
 | `title_max_chars` | int | 20 | 标题字数上限 |

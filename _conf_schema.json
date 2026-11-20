@@ -66,6 +66,20 @@
     "default": true,
     "hint": "对应 /rewrite ai，关闭后只允许改写用户自己的消息。"
   },
+  "rewrite_mode": {
+    "description": "/rewrite 生成回复使用的链路",
+    "type": "string",
+    "default": "astrbot",
+    "options": [
+      "astrbot",
+      "plugin"
+    ],
+    "labels": [
+      "AstrBot 官方链路（可调用工具）",
+      "插件内置流水线（不调用工具）"
+    ],
+    "hint": "astrbot：截断历史后交给 AstrBot 官方流程生成，能调用工具、继承人格与模型配置；plugin：插件直接调用 llm_generate，不经过 Agent，无法调用工具，但不受 CmdMask 等插件的 call_llm 标记影响。"
+  },
   "prompt_preview_chars": {
     "description": "/showprompt 每条内容的预览字数",
     "type": "int",
