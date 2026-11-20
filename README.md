@@ -2,7 +2,7 @@
 
 围绕 **AI 与用户的对话历史** 提供增强能力：检索、回看、分支、改写、提示词插入/覆盖。
 
-> Power by serveryyswys · v1.1.0
+> Power by serveryyswys · v1.2.0
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -62,6 +62,9 @@
 - 改写与重发都交回 **AstrBot 官方消息链路**：插件把历史截断到这一轮之前、\
   替换 `event.message_str`，再由官方流程用同样的提示词、模型与会话状态生成回复，\
   不再走插件自建的 `llm_generate` 流水线。
+- 兼容 CmdMask 这类「把别名改写成指令」的插件：它们会调用 `should_call_llm(True)`\
+  关闭默认 LLM 链路，`/rewrite` 发起前会复位该标记与唤醒状态，否则会截断历史却不生成回复。
+- 兜底：重写后 180 秒仍未拿到回复时，看门狗会把被截断的原轮次恢复回对话历史。
 - 每轮独立记录版本：原版为第 0 版，每次 `/rewrite u` 追加一版；官方链路生成完回复后\
   由 `on_llm_response` 钩子把回复原文回填到该版本。
 - `/rewrite get`：输出「当前已重写 n 次，现在是第 n 版」或「现在是原版」。
